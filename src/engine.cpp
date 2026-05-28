@@ -90,6 +90,8 @@ void LlamaEngine::load() {
     if (m_knowledge.empty()) {
         m_logger->warn("Knowledge storage is empty");
     }
+
+    m_logger->info("Workplace role: {}", to_string(m_engine_config.workplace_role));
 }
 
 std::string LlamaEngine::ask(std::string_view user_text) {
@@ -108,15 +110,30 @@ std::string LlamaEngine::ask(std::string_view user_text) {
     m_history.append(std::move(user_message));
     m_history.save();
 
-    const auto knowledge = m_knowledge.retrieve(user_text,
-                                                m_engine_config.max_knowledge_documents,
-                                                m_engine_config.max_knowledge_chars_per_document);
+    const auto knowledge = m_knowledge.retrieve(
+            user_text,
+            knowledge_retrieve_options_s{
+                    .workplace_role = m_engine_config.workplace_role,
+                    .include_general = true,
+                    .include_policy = false,
+                    .include_custom = true,
+                    .limit = m_engine_config.max_knowledge_documents,
+                    .max_chars_per_document = m_engine_config.max_knowledge_chars_per_document,
+            });
+
+    for (const auto &item : knowledge) {
+        m_logger->debug("Retrieved knowledge: {} score={} role={} source={}",
+                        item.filename,
+                        item.score,
+                        to_string(item.role),
+                        to_string(item.source));
+    }
 
     const auto request_messages = build_request_messages(knowledge);
     auto response = m_client.complete_chat(request_messages);
 
     auto source_filenames = make_source_filenames(knowledge);
-    auto answer = ensure_sources_block(std::move(response.content), source_filenames);
+    auto answer = ensure_sources_block(response.content, source_filenames);
 
     auto assistant_message = chat_message_s{
             .role = chat_role_e::assistant,
@@ -134,17 +151,18 @@ std::string LlamaEngine::ask(std::string_view user_text) {
 
 const ChatHistory &LlamaEngine::history() const noexcept { return m_history; }
 
-std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) {
-    auto prompt = std::string{"Ты — AI-помощник стажёра в сфере услуг.\n"
+std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
+    auto prompt = std::format("Ты — AI-помощник стажёра в сфере услуг.\n"
+                              "Роль стажёра: {}.\n"
                               "Отвечай на русском языке, просто, коротко и по делу.\n"
                               "Используй найденные Markdown-фрагменты как главный источник регламента.\n"
                               "Если точного ответа в фрагментах нет, прямо скажи: точный регламент не найден.\n"
-                              "После этого можно дать только общий безопасный совет.\n"
                               "Не выдумывай правила компании, скидки, возвраты, компенсации и гарантии.\n"
                               "В спорных, денежных, юридических, медицинских, опасных и конфликтных ситуациях советуй "
                               "обратиться к старшему.\n"
-                              "Формат: короткий ответ + ряд поэтапных понятных шагов, шаг-за-шагом.\n"
-                              "Не пиши предупреждение, источники и список файлов: программа добавит их сама.\n"};
+                              "Формат: короткий ответ + понятные шаги.\n"
+                              "Не пиши предупреждение и источники: программа добавит их сама.\n",
+                              to_string(m_engine_config.workplace_role));
 
     if (knowledge.empty()) {
         prompt += "\nФрагменты базы знаний не найдены.\n";

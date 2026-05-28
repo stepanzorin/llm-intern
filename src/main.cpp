@@ -88,11 +88,12 @@ int main() try {
         auto server_config = load_or_make_default_server_config(server_config_path, logger);
 
         auto engine_config = engine_config_s{
-                .history_file = app_dir / "messages_history.json",
+                .history_file = app_dir / "message_history.json",
                 .knowledge_directory = app_dir / "knowledge",
-                .max_history_messages_for_request = 24,
-                .max_knowledge_documents = 3,
-                .max_knowledge_chars_per_document = 6000,
+                .workplace_role = workplace_role_e::beauty_admin,
+                .max_history_messages_for_request = 4,
+                .max_knowledge_documents = 2,
+                .max_knowledge_chars_per_document = 2500,
         };
 
         auto engine = LlamaEngine{

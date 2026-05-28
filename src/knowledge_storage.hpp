@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,10 +14,41 @@
 
 namespace stz::intern {
 
+enum class knowledge_source_e {
+    builtin,
+    custom,
+};
+
+enum class workplace_role_e {
+    all,
+    general,
+    barista,
+    cashier,
+    reception,
+    callcenter,
+    seller,
+    beauty_admin,
+};
+
+[[nodiscard]] std::string_view to_string(knowledge_source_e source) noexcept;
+
+[[nodiscard]] std::string_view to_string(workplace_role_e role) noexcept;
+
+[[nodiscard]] workplace_role_e workplace_role_from_string(std::string_view text);
+
 struct knowledge_document_s {
     std::string filename = {};
     std::string title = {};
     std::string content = {};
+
+    std::string normalized_filename = {};
+    std::string normalized_title = {};
+    std::string normalized_content = {};
+
+    knowledge_source_e source = knowledge_source_e::builtin;
+    workplace_role_e role = workplace_role_e::general;
+
+    bool policy = false;
 };
 
 struct retrieved_knowledge_s {
@@ -24,6 +56,17 @@ struct retrieved_knowledge_s {
     std::string title = {};
     std::string content = {};
     std::size_t score = {};
+    knowledge_source_e source = knowledge_source_e::builtin;
+    workplace_role_e role = workplace_role_e::general;
+};
+
+struct knowledge_retrieve_options_s {
+    workplace_role_e workplace_role = workplace_role_e::all;
+    bool include_general = true;
+    bool include_policy = false;
+    bool include_custom = true;
+    std::size_t limit = 3;
+    std::size_t max_chars_per_document = 3000;
 };
 
 class KnowledgeStorage final {
@@ -32,18 +75,31 @@ public:
 
     void load();
 
-    [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve(
-            std::string_view query,
-            std::size_t limit,
-            std::size_t max_chars_per_document) const;
+    [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve(std::string_view query,
+                                                              const knowledge_retrieve_options_s &options) const;
 
     [[nodiscard]] bool empty() const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept;
 
 private:
+    [[nodiscard]] std::vector<std::size_t> make_candidate_indices(const knowledge_retrieve_options_s &options) const;
+
+    [[nodiscard]] static std::size_t score_document(const knowledge_document_s &document,
+                                                    std::span<const std::string> terms) noexcept;
+
     std::filesystem::path m_directory;
     std::vector<knowledge_document_s> m_documents;
+
+    std::vector<std::size_t> m_general_indices;
+    std::vector<std::size_t> m_barista_indices;
+    std::vector<std::size_t> m_cashier_indices;
+    std::vector<std::size_t> m_reception_indices;
+    std::vector<std::size_t> m_callcenter_indices;
+    std::vector<std::size_t> m_seller_indices;
+    std::vector<std::size_t> m_beauty_admin_indices;
+    std::vector<std::size_t> m_policy_indices;
+
     std::shared_ptr<spdlog::logger> m_logger;
 };
 
