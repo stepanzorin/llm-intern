@@ -73,6 +73,8 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
             {"temperature", m_config.temperature},
             {"top_p", m_config.top_p},
             {"max_tokens", m_config.max_tokens},
+            {"cache_prompt", true},
+            {"id_slot", 0},
     };
 
     const auto body = request.dump();

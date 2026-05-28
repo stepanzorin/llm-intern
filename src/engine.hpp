@@ -48,7 +48,7 @@ private:
     [[nodiscard]] static std::vector<std::string> make_source_filenames(
             std::span<const retrieved_knowledge_s> knowledge);
 
-    [[nodiscard]] static std::string ensure_sources_block(std::string answer,
+    [[nodiscard]] static std::string ensure_sources_block(const std::string& answer,
                                                           std::span<const std::string> source_filenames);
 
     llama_server_config_s m_server_config;
