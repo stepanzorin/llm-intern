@@ -20,7 +20,7 @@ struct llama_server_config_s {
 
     std::optional<std::string> model_alias = {"intern-local-model"};
 
-    std::int32_t context_size = 8192;
+    std::int32_t context_size = 2048;
     std::int32_t parallel_slots = 1;
 
     std::int32_t max_tokens = 1024;
