@@ -1,6 +1,7 @@
 #include "knowledge_storage.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cctype>
 #include <charconv>
@@ -18,6 +19,7 @@ namespace {
 
 constexpr auto exact_frequent_query_score = std::size_t{1024};
 constexpr auto unordered_frequent_query_score = std::size_t{960};
+constexpr auto unordered_fuzzy_frequent_query_score = std::size_t{900};
 
 [[nodiscard]] bool is_markdown_file(const std::filesystem::path &filename) {
     auto extension = filename.extension().string();
@@ -186,6 +188,136 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     return result;
 }
 
+[[nodiscard]] std::vector<char32_t> utf8_to_codepoints(const std::string_view text) {
+    auto result = std::vector<char32_t>{};
+
+    auto index = std::size_t{};
+
+    while (index < text.size()) {
+        const auto first = static_cast<unsigned char>(text[index]);
+
+        if (first < 0x80) {
+            result.push_back(static_cast<char32_t>(first));
+            ++index;
+            continue;
+        }
+
+        if ((first & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            result.push_back(static_cast<char32_t>(((first & 0x1F) << 6) | (second & 0x3F)));
+            index += 2;
+            continue;
+        }
+
+        if ((first & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            result.push_back(static_cast<char32_t>(((first & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F)));
+            index += 3;
+            continue;
+        }
+
+        if ((first & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            const auto fourth = static_cast<unsigned char>(text[index + 3]);
+            result.push_back(static_cast<char32_t>(((first & 0x07) << 18) | ((second & 0x3F) << 12) |
+                                                   ((third & 0x3F) << 6) | (fourth & 0x3F)));
+            index += 4;
+            continue;
+        }
+
+        result.push_back(static_cast<char32_t>(first));
+        ++index;
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::size_t max_typo_distance_for_word(const std::size_t codepoints_count) noexcept {
+    if (codepoints_count < 5) {
+        return 0;
+    }
+
+    if (codepoints_count <= 7) {
+        return 1;
+    }
+
+    return 2;
+}
+
+[[nodiscard]] std::size_t damerau_levenshtein_distance(std::span<const char32_t> lhs,
+                                                       std::span<const char32_t> rhs,
+                                                       const std::size_t max_distance) {
+    if (lhs.size() > rhs.size() + max_distance || rhs.size() > lhs.size() + max_distance) {
+        return max_distance + 1;
+    }
+
+    auto previous_previous = std::vector<std::size_t>(rhs.size() + 1);
+    auto previous = std::vector<std::size_t>(rhs.size() + 1);
+    auto current = std::vector<std::size_t>(rhs.size() + 1);
+
+    for (auto j = std::size_t{}; j <= rhs.size(); ++j) {
+        previous[j] = j;
+    }
+
+    for (auto i = std::size_t{1}; i <= lhs.size(); ++i) {
+        current[0] = i;
+
+        auto row_min = current[0];
+
+        for (auto j = std::size_t{1}; j <= rhs.size(); ++j) {
+            const auto cost = lhs[i - 1] == rhs[j - 1] ? std::size_t{} : std::size_t{1};
+
+            auto value = std::min({
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + cost,
+            });
+
+            if (i > 1 && j > 1 && lhs[i - 1] == rhs[j - 2] && lhs[i - 2] == rhs[j - 1]) {
+                value = std::min(value, previous_previous[j - 2] + 1);
+            }
+
+            current[j] = value;
+            row_min = std::min(row_min, value);
+        }
+
+        if (row_min > max_distance) {
+            return max_distance + 1;
+        }
+
+        previous_previous = previous;
+        previous = current;
+    }
+
+    return previous[rhs.size()];
+}
+
+[[nodiscard]] bool typo_match_terms(const std::string_view lhs, const std::string_view rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
+
+    const auto lhs_codepoints = utf8_to_codepoints(lhs);
+    const auto rhs_codepoints = utf8_to_codepoints(rhs);
+
+    const auto min_size = std::min(lhs_codepoints.size(), rhs_codepoints.size());
+    const auto max_size = std::max(lhs_codepoints.size(), rhs_codepoints.size());
+
+    const auto max_distance = max_typo_distance_for_word(max_size);
+
+    if (max_distance == 0) {
+        return false;
+    }
+
+    if (max_size - min_size > max_distance) {
+        return false;
+    }
+
+    return damerau_levenshtein_distance(lhs_codepoints, rhs_codepoints, max_distance) <= max_distance;
+}
+
 [[nodiscard]] bool is_ascii_separator(const unsigned char byte) noexcept {
     if (byte >= 128) {
         return false;
@@ -292,14 +424,27 @@ void collapse_ascii_spaces(std::string &text) {
 }
 
 [[nodiscard]] bool is_weak_intent_term(const std::string_view term) noexcept {
-    return term == "yclients" || term == "клиент" || term == "клиента" || term == "клиенту" || term == "клиентом" ||
-           term == "запись" || term == "записи" || term == "записью" || term == "визит" || term == "визита" ||
-           term == "визитом" || term == "услуга" || term == "услугу" || term == "услуги" || term == "что" ||
-           term == "как" || term == "где" || term == "надо" || term == "нужно" || term == "можно";
+    constexpr auto weak_terms = std::array{
+            std::string_view{"yclients"}, std::string_view{"клиент"},   std::string_view{"клиента"},
+            std::string_view{"клиенту"},  std::string_view{"клиентом"}, std::string_view{"запись"},
+            std::string_view{"записи"},   std::string_view{"записью"},  std::string_view{"визит"},
+            std::string_view{"визита"},   std::string_view{"визитом"},  std::string_view{"услуга"},
+            std::string_view{"услугу"},   std::string_view{"услуги"},   std::string_view{"что"},
+            std::string_view{"как"},      std::string_view{"где"},      std::string_view{"надо"},
+            std::string_view{"нужно"},    std::string_view{"можно"},
+    };
+
+    return std::ranges::any_of(weak_terms,
+                               [&](const std::string_view weak_term) { return typo_match_terms(term, weak_term); });
 }
 
 [[nodiscard]] bool contains_term(const std::span<const std::string> terms, const std::string_view term) noexcept {
     return std::ranges::find(terms, term) != terms.end();
+}
+
+[[nodiscard]] bool contains_term_fuzzy(const std::span<const std::string> terms,
+                                       const std::string_view query_term) noexcept {
+    return std::ranges::any_of(terms, [&](const std::string &term) { return typo_match_terms(query_term, term); });
 }
 
 [[nodiscard]] bool all_strong_query_terms_are_present(
@@ -315,6 +460,26 @@ void collapse_ascii_spaces(std::string &text) {
         ++strong_terms_count;
 
         if (!contains_term(frequent_query_terms, term)) {
+            return false;
+        }
+    }
+
+    return strong_terms_count != 0;
+}
+
+[[nodiscard]] bool all_strong_query_terms_are_present_fuzzy(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    auto strong_terms_count = std::size_t{};
+
+    for (const auto &term : query_terms) {
+        if (is_weak_intent_term(term)) {
+            continue;
+        }
+
+        ++strong_terms_count;
+
+        if (!contains_term_fuzzy(frequent_query_terms, term)) {
             return false;
         }
     }
@@ -522,6 +687,11 @@ void append_unique_indices(std::vector<std::size_t> &target, const std::span<con
     }
 }
 
+[[nodiscard]] bool is_direct_match(const knowledge_match_e match) noexcept {
+    return match == knowledge_match_e::exact_frequent_query || match == knowledge_match_e::unordered_frequent_query ||
+           match == knowledge_match_e::unordered_fuzzy_frequent_query;
+}
+
 [[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_document_s &document,
                                                             const std::size_t score,
                                                             const std::size_t max_chars_per_document,
@@ -529,10 +699,8 @@ void append_unique_indices(std::vector<std::size_t> &target, const std::span<con
     return retrieved_knowledge_s{
             .filename = document.filename,
             .title = document.title,
-            .content = match == knowledge_match_e::exact_frequent_query ||
-                                       match == knowledge_match_e::unordered_frequent_query
-                               ? document.content
-                               : take_prefix_utf8_safe(document.content, max_chars_per_document),
+            .content = is_direct_match(match) ? document.content
+                                              : take_prefix_utf8_safe(document.content, max_chars_per_document),
             .score = score,
             .source = document.source,
             .role = document.role,
@@ -571,6 +739,7 @@ std::string_view to_string(const knowledge_match_e match) noexcept {
         case knowledge_match_e::none: return "none";
         case knowledge_match_e::exact_frequent_query: return "exact_frequent_query";
         case knowledge_match_e::unordered_frequent_query: return "unordered_frequent_query";
+        case knowledge_match_e::unordered_fuzzy_frequent_query: return "unordered_fuzzy_frequent_query";
         case knowledge_match_e::ranked: return "ranked";
     }
 
@@ -776,6 +945,14 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
+        if (has_unordered_fuzzy_frequent_query_match(document, terms)) {
+            direct_results.push_back(make_retrieved_document(document,
+                                                             unordered_fuzzy_frequent_query_score,
+                                                             options.max_chars_per_document,
+                                                             knowledge_match_e::unordered_fuzzy_frequent_query));
+            continue;
+        }
+
         const auto score = score_document(document, terms, normalized_query);
 
         if (score == 0) {
@@ -917,6 +1094,28 @@ bool KnowledgeStorage::has_unordered_frequent_query_match(const knowledge_docume
         }
 
         if (all_strong_query_terms_are_present(query_terms, frequent_query_terms)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool KnowledgeStorage::has_unordered_fuzzy_frequent_query_match(
+        const knowledge_document_s &document,
+        const std::span<const std::string> query_terms) noexcept {
+    if (query_terms.size() < 2) {
+        return false;
+    }
+
+    for (const auto &frequent_query : document.normalized_frequent_queries) {
+        const auto frequent_query_terms = make_search_terms(frequent_query);
+
+        if (frequent_query_terms.empty()) {
+            continue;
+        }
+
+        if (all_strong_query_terms_are_present_fuzzy(query_terms, frequent_query_terms)) {
             return true;
         }
     }

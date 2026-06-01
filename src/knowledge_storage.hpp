@@ -34,6 +34,7 @@ enum class knowledge_match_e {
     none,
     exact_frequent_query,
     unordered_frequent_query,
+    unordered_fuzzy_frequent_query,
     ranked,
 };
 
@@ -106,6 +107,10 @@ private:
 
     [[nodiscard]] static bool has_unordered_frequent_query_match(const knowledge_document_s &document,
                                                                  std::span<const std::string> query_terms) noexcept;
+
+    [[nodiscard]] static bool has_unordered_fuzzy_frequent_query_match(
+            const knowledge_document_s &document,
+            std::span<const std::string> query_terms) noexcept;
 
     std::filesystem::path m_directory;
     std::vector<knowledge_document_s> m_documents;

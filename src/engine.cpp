@@ -334,7 +334,8 @@ bool LlamaEngine::can_answer_without_llm(const std::span<const retrieved_knowled
     }
 
     return knowledge.front().match == knowledge_match_e::exact_frequent_query ||
-           knowledge.front().match == knowledge_match_e::unordered_frequent_query;
+           knowledge.front().match == knowledge_match_e::unordered_frequent_query ||
+           knowledge.front().match == knowledge_match_e::unordered_fuzzy_frequent_query;
 }
 
 std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_knowledge_s> knowledge) {
