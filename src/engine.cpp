@@ -69,6 +69,79 @@ constexpr auto service_warning_text =
     return message;
 }
 
+[[nodiscard]] bool is_markdown_heading(const std::string_view line) {
+    auto trimmed = std::string{line};
+    util::trim(trimmed);
+
+    return trimmed.starts_with("#");
+}
+
+[[nodiscard]] std::string markdown_heading_text(const std::string_view line) {
+    auto text = std::string{line};
+    util::trim(text);
+
+    while (!text.empty() && text.front() == '#') {
+        text.erase(text.begin());
+    }
+
+    util::trim(text);
+
+    return text;
+}
+
+[[nodiscard]] bool is_target_answer_heading(const std::string_view line) {
+    auto text = markdown_heading_text(line);
+    util::trim(text);
+
+    return text == "Пошаговая инструкция что делать";
+}
+
+[[nodiscard]] std::string extract_direct_answer_section(const std::string_view markdown) {
+    auto inside_section = false;
+    auto result = std::string{};
+    auto position = std::size_t{};
+
+    while (position <= markdown.size()) {
+        const auto line_end = markdown.find('\n', position);
+        const auto line = markdown.substr(
+                position,
+                line_end == std::string_view::npos ? markdown.size() - position : line_end - position);
+
+        if (!inside_section) {
+            if (is_markdown_heading(line) && is_target_answer_heading(line)) {
+                inside_section = true;
+            }
+        } else {
+            if (is_markdown_heading(line)) {
+                break;
+            }
+
+            if (!result.empty()) {
+                result.push_back('\n');
+            }
+
+            result += line;
+        }
+
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+
+        position = line_end + 1;
+    }
+
+    util::trim(result);
+
+    if (!result.empty()) {
+        return result;
+    }
+
+    auto fallback = std::string{markdown};
+    util::trim(fallback);
+
+    return fallback;
+}
+
 } // namespace
 
 LlamaEngine::LlamaEngine(llama_server_config_s server_config,
@@ -94,7 +167,7 @@ void LlamaEngine::load() {
     m_logger->info("Workplace role: {}", to_string(m_engine_config.workplace_role));
 }
 
-std::string LlamaEngine::ask(std::string_view user_text) {
+std::string LlamaEngine::ask(const std::string_view user_text) {
     if (util::is_blank(user_text)) {
         throw std::runtime_error{"User message is empty"};
     }
@@ -122,11 +195,33 @@ std::string LlamaEngine::ask(std::string_view user_text) {
             });
 
     for (const auto &item : knowledge) {
-        m_logger->debug("Retrieved knowledge: {} score={} role={} source={}",
-                        item.filename,
-                        item.score,
-                        to_string(item.role),
-                        to_string(item.source));
+        m_logger->info("Retrieved knowledge: {} score={} role={} source={} match={}",
+                       item.filename,
+                       item.score,
+                       to_string(item.role),
+                       to_string(item.source),
+                       to_string(item.match));
+    }
+
+    if (can_answer_without_llm(knowledge)) {
+        auto source_filenames = make_source_filenames(knowledge);
+        auto answer_body = make_direct_answer(knowledge);
+        auto answer = ensure_sources_block(answer_body, source_filenames);
+
+        auto assistant_message = chat_message_s{
+                .role = chat_role_e::assistant,
+                .name = "AI-бот",
+                .content = answer,
+                .created_at = util::make_local_timestamp(),
+                .source_files = std::move(source_filenames),
+        };
+
+        m_history.append(std::move(assistant_message));
+        m_history.save();
+
+        m_logger->info("Answered without LLM by direct knowledge match");
+
+        return answer;
     }
 
     const auto request_messages = build_request_messages(knowledge);
@@ -152,20 +247,14 @@ std::string LlamaEngine::ask(std::string_view user_text) {
 const ChatHistory &LlamaEngine::history() const noexcept { return m_history; }
 
 std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
-    auto prompt = std::format(
-            "Ты — AI-помощник стажёра в сфере услуг.\n"
-            "Роль стажёра: {}.\n"
-            "Отвечай на русском языке, просто и по делу.\n"
-            "Используй найденные Markdown-фрагменты как главный источник регламента.\n"
-            "Если точного ответа в фрагментах нет, прямо скажи: точный регламент не найден.\n"
-            "Не выдумывай правила компании, скидки, возвраты, компенсации и гарантии.\n"
-            "В спорных, денежных, юридических, медицинских, опасных и конфликтных ситуациях советуй обратиться к "
-            "старшему.\n"
-            "Формат: короткий вывод + шаги списком.\n"
-            "Если пользователь просит действия, инструкцию или по шагам — дай 6-10 шагов из фрагментов.\n"
-            "Кратко объясняй, но не сокращай найденные шаги.\n"
-            "Не пиши предупреждение и источники: программа добавит их сама.\n",
-            to_string(m_engine_config.workplace_role));
+    auto prompt = std::format("Ты — AI-помощник стажёра в сфере услуг.\n"
+                              "Роль стажёра: {}.\n"
+                              "Отвечай на русском языке, просто, понятно и по делу.\n"
+                              "Используй найденные Markdown-фрагменты как главный источник регламента.\n"
+                              "Если точного ответа в фрагментах нет, прямо скажи: точный регламент не найден.\n"
+                              "Не выдумывай шаги, правила компании, скидки, возвраты, компенсации и гарантии.\n"
+                              "Формат: полноценный список понятных шагов из файла.\n",
+                              to_string(m_engine_config.workplace_role));
 
     if (knowledge.empty()) {
         prompt += "\nФрагменты базы знаний не найдены.\n";
@@ -237,6 +326,21 @@ std::string LlamaEngine::ensure_sources_block(const std::string &answer,
     result += std::format("\n\nОпирался на файлы: {}", join_source_filenames(source_filenames));
 
     return result;
+}
+
+bool LlamaEngine::can_answer_without_llm(const std::span<const retrieved_knowledge_s> knowledge) noexcept {
+    if (knowledge.size() != 1) {
+        return false;
+    }
+
+    return knowledge.front().match == knowledge_match_e::exact_frequent_query ||
+           knowledge.front().match == knowledge_match_e::unordered_frequent_query;
+}
+
+std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_knowledge_s> knowledge) {
+    assert(can_answer_without_llm(knowledge));
+
+    return extract_direct_answer_section(knowledge.front().content);
 }
 
 } // namespace stz::intern

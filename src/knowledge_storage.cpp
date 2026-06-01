@@ -16,6 +16,9 @@ namespace stz::intern {
 
 namespace {
 
+constexpr auto exact_frequent_query_score = std::size_t{1024};
+constexpr auto unordered_frequent_query_score = std::size_t{960};
+
 [[nodiscard]] bool is_markdown_file(const std::filesystem::path &filename) {
     auto extension = filename.extension().string();
 
@@ -26,12 +29,12 @@ namespace {
     return extension == ".md" || extension == ".markdown";
 }
 
-[[nodiscard]] bool starts_with_digit_prefix(std::string_view filename) noexcept {
+[[nodiscard]] bool starts_with_digit_prefix(const std::string_view filename) noexcept {
     return filename.size() >= 2 && std::isdigit(static_cast<unsigned char>(filename[0])) != 0 &&
            std::isdigit(static_cast<unsigned char>(filename[1])) != 0;
 }
 
-[[nodiscard]] std::int32_t parse_file_number_prefix(std::string_view filename) noexcept {
+[[nodiscard]] std::int32_t parse_file_number_prefix(const std::string_view filename) noexcept {
     if (!starts_with_digit_prefix(filename)) {
         return -1;
     }
@@ -85,7 +88,7 @@ namespace {
     return filename.find("70_llm_answer_policy") != std::string_view::npos;
 }
 
-[[nodiscard]] knowledge_source_e detect_source_type(std::string_view relative_filename) noexcept {
+[[nodiscard]] knowledge_source_e detect_source_type(const std::string_view relative_filename) noexcept {
     if (relative_filename.starts_with("custom/") || relative_filename.starts_with("custom\\") ||
         relative_filename.find("/custom/") != std::string_view::npos ||
         relative_filename.find("\\custom\\") != std::string_view::npos) {
@@ -95,18 +98,89 @@ namespace {
     return knowledge_source_e::builtin;
 }
 
+void append_utf8(const char32_t codepoint, std::string &result) {
+    if (codepoint <= 0x7F) {
+        result.push_back(static_cast<char>(codepoint));
+        return;
+    }
+
+    if (codepoint <= 0x7FF) {
+        result.push_back(static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F)));
+        result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        return;
+    }
+
+    if (codepoint <= 0xFFFF) {
+        result.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+        result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        return;
+    }
+
+    result.push_back(static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07)));
+    result.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+}
+
+[[nodiscard]] char32_t lowercase_codepoint(const char32_t codepoint) noexcept {
+    if (codepoint >= U'A' && codepoint <= U'Z') {
+        return codepoint + 32;
+    }
+
+    if (codepoint >= U'А' && codepoint <= U'Я') {
+        return codepoint + 32;
+    }
+
+    if (codepoint == U'Ё') {
+        return U'ё';
+    }
+
+    return codepoint;
+}
+
 [[nodiscard]] std::string normalize_for_search(const std::string_view text) {
     auto result = std::string{};
     result.reserve(text.size());
 
-    for (const auto ch : text) {
-        const auto byte = static_cast<unsigned char>(ch);
+    auto index = std::size_t{};
 
-        if (byte < 128) {
-            result.push_back(static_cast<char>(std::tolower(byte)));
-        } else {
-            result.push_back(ch);
+    while (index < text.size()) {
+        const auto first = static_cast<unsigned char>(text[index]);
+
+        if (first < 0x80) {
+            result.push_back(static_cast<char>(std::tolower(first)));
+            ++index;
+            continue;
         }
+
+        auto codepoint = char32_t{};
+        auto length = std::size_t{};
+
+        if ((first & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            codepoint = static_cast<char32_t>(((first & 0x1F) << 6) | (second & 0x3F));
+            length = 2;
+        } else if ((first & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            codepoint = static_cast<char32_t>(((first & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F));
+            length = 3;
+        } else if ((first & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            const auto fourth = static_cast<unsigned char>(text[index + 3]);
+            codepoint = static_cast<char32_t>(((first & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) |
+                                              (fourth & 0x3F));
+            length = 4;
+        } else {
+            result.push_back(static_cast<char>(first));
+            ++index;
+            continue;
+        }
+
+        append_utf8(lowercase_codepoint(codepoint), result);
+        index += length;
     }
 
     return result;
@@ -120,8 +194,66 @@ namespace {
     return std::isspace(byte) != 0 || std::ispunct(byte) != 0;
 }
 
+void strip_ascii_punctuation_edges(std::string &text) {
+    while (!text.empty()) {
+        const auto byte = static_cast<unsigned char>(text.front());
+
+        if (byte >= 128 || std::ispunct(byte) == 0) {
+            break;
+        }
+
+        text.erase(text.begin());
+    }
+
+    while (!text.empty()) {
+        const auto byte = static_cast<unsigned char>(text.back());
+
+        if (byte >= 128 || std::ispunct(byte) == 0) {
+            break;
+        }
+
+        text.pop_back();
+    }
+}
+
+void collapse_ascii_spaces(std::string &text) {
+    auto result = std::string{};
+    result.reserve(text.size());
+
+    auto previous_space = false;
+
+    for (const auto ch : text) {
+        const auto byte = static_cast<unsigned char>(ch);
+
+        if (byte < 128 && std::isspace(byte) != 0) {
+            if (!previous_space) {
+                result.push_back(' ');
+                previous_space = true;
+            }
+
+            continue;
+        }
+
+        result.push_back(ch);
+        previous_space = false;
+    }
+
+    text = std::move(result);
+}
+
+[[nodiscard]] std::string make_search_key(const std::string_view text) {
+    auto result = normalize_for_search(text);
+    util::trim(result);
+    strip_ascii_punctuation_edges(result);
+    util::trim(result);
+    collapse_ascii_spaces(result);
+    util::trim(result);
+
+    return result;
+}
+
 [[nodiscard]] std::vector<std::string> make_search_terms(const std::string_view query) {
-    const auto normalized = normalize_for_search(query);
+    const auto normalized = make_search_key(query);
 
     auto terms = std::vector<std::string>{};
     auto current = std::string{};
@@ -157,6 +289,37 @@ namespace {
     }
 
     return unique_terms;
+}
+
+[[nodiscard]] bool is_weak_intent_term(const std::string_view term) noexcept {
+    return term == "yclients" || term == "клиент" || term == "клиента" || term == "клиенту" || term == "клиентом" ||
+           term == "запись" || term == "записи" || term == "записью" || term == "визит" || term == "визита" ||
+           term == "визитом" || term == "услуга" || term == "услугу" || term == "услуги" || term == "что" ||
+           term == "как" || term == "где" || term == "надо" || term == "нужно" || term == "можно";
+}
+
+[[nodiscard]] bool contains_term(const std::span<const std::string> terms, const std::string_view term) noexcept {
+    return std::ranges::find(terms, term) != terms.end();
+}
+
+[[nodiscard]] bool all_strong_query_terms_are_present(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    auto strong_terms_count = std::size_t{};
+
+    for (const auto &term : query_terms) {
+        if (is_weak_intent_term(term)) {
+            continue;
+        }
+
+        ++strong_terms_count;
+
+        if (!contains_term(frequent_query_terms, term)) {
+            return false;
+        }
+    }
+
+    return strong_terms_count != 0;
 }
 
 [[nodiscard]] std::size_t count_occurrences(std::string_view text, const std::string_view term) noexcept {
@@ -209,6 +372,118 @@ namespace {
     return fallback;
 }
 
+[[nodiscard]] bool is_markdown_heading(const std::string_view line) {
+    auto trimmed = std::string{line};
+    util::trim(trimmed);
+
+    return trimmed.starts_with("#");
+}
+
+[[nodiscard]] std::string markdown_heading_text(const std::string_view line) {
+    auto text = std::string{line};
+    util::trim(text);
+
+    while (!text.empty() && text.front() == '#') {
+        text.erase(text.begin());
+    }
+
+    util::trim(text);
+
+    return make_search_key(text);
+}
+
+[[nodiscard]] bool is_frequent_queries_heading(const std::string_view line) {
+    if (!is_markdown_heading(line)) {
+        return false;
+    }
+
+    return markdown_heading_text(line) == "частые запросы пользователя";
+}
+
+void remove_markdown_list_marker(std::string &line) {
+    util::trim(line);
+
+    if (line.size() >= 2 && (line.starts_with("- ") || line.starts_with("* "))) {
+        line.erase(0, 2);
+        util::trim(line);
+        return;
+    }
+
+    auto digit_count = std::size_t{};
+
+    while (digit_count < line.size() && std::isdigit(static_cast<unsigned char>(line[digit_count])) != 0) {
+        ++digit_count;
+    }
+
+    if (digit_count != 0 && digit_count + 1 < line.size() && (line[digit_count] == '.' || line[digit_count] == ')') &&
+        std::isspace(static_cast<unsigned char>(line[digit_count + 1])) != 0) {
+        line.erase(0, digit_count + 2);
+        util::trim(line);
+    }
+}
+
+[[nodiscard]] std::vector<std::string> extract_frequent_queries(const std::string_view content) {
+    auto result = std::vector<std::string>{};
+
+    auto inside_section = false;
+    auto position = std::size_t{};
+
+    while (position <= content.size()) {
+        const auto line_end = content.find('\n', position);
+        const auto line_view = content.substr(
+                position,
+                line_end == std::string_view::npos ? content.size() - position : line_end - position);
+
+        auto line = std::string{line_view};
+        util::trim(line);
+
+        if (!inside_section) {
+            if (is_frequent_queries_heading(line)) {
+                inside_section = true;
+            }
+        } else {
+            if (is_markdown_heading(line)) {
+                break;
+            }
+
+            remove_markdown_list_marker(line);
+
+            if (!line.empty()) {
+                result.push_back(std::move(line));
+            }
+        }
+
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+
+        position = line_end + 1;
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::vector<std::string> normalize_frequent_queries(const std::span<const std::string> queries) {
+    auto result = std::vector<std::string>{};
+    auto seen = std::unordered_set<std::string>{};
+
+    result.reserve(queries.size());
+
+    for (const auto &query : queries) {
+        auto normalized = make_search_key(query);
+
+        if (normalized.empty()) {
+            continue;
+        }
+
+        if (seen.insert(normalized).second) {
+            result.push_back(std::move(normalized));
+        }
+    }
+
+    return result;
+}
+
 [[nodiscard]] std::string take_prefix_utf8_safe(const std::string_view text, const std::size_t max_bytes) {
     if (text.size() <= max_bytes) {
         return std::string{text};
@@ -232,7 +507,7 @@ namespace {
     return result;
 }
 
-void append_unique_indices(std::vector<std::size_t> &target, std::span<const std::size_t> source) {
+void append_unique_indices(std::vector<std::size_t> &target, const std::span<const std::size_t> source) {
     auto seen = std::unordered_set<std::size_t>{};
     seen.reserve(target.size() + source.size());
 
@@ -245,6 +520,24 @@ void append_unique_indices(std::vector<std::size_t> &target, std::span<const std
             target.push_back(index);
         }
     }
+}
+
+[[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_document_s &document,
+                                                            const std::size_t score,
+                                                            const std::size_t max_chars_per_document,
+                                                            const knowledge_match_e match) {
+    return retrieved_knowledge_s{
+            .filename = document.filename,
+            .title = document.title,
+            .content = match == knowledge_match_e::exact_frequent_query ||
+                                       match == knowledge_match_e::unordered_frequent_query
+                               ? document.content
+                               : take_prefix_utf8_safe(document.content, max_chars_per_document),
+            .score = score,
+            .source = document.source,
+            .role = document.role,
+            .match = match,
+    };
 }
 
 } // namespace
@@ -273,9 +566,19 @@ std::string_view to_string(const workplace_role_e role) noexcept {
     return "all";
 }
 
+std::string_view to_string(const knowledge_match_e match) noexcept {
+    switch (match) {
+        case knowledge_match_e::none: return "none";
+        case knowledge_match_e::exact_frequent_query: return "exact_frequent_query";
+        case knowledge_match_e::unordered_frequent_query: return "unordered_frequent_query";
+        case knowledge_match_e::ranked: return "ranked";
+    }
+
+    return "none";
+}
+
 workplace_role_e workplace_role_from_string(std::string_view text) {
-    auto normalized = normalize_for_search(text);
-    util::trim(normalized);
+    auto normalized = make_search_key(text);
 
     if (normalized == "all") {
         return workplace_role_e::all;
@@ -344,6 +647,7 @@ void KnowledgeStorage::load() {
         auto relative_filename = std::filesystem::relative(entry.path(), m_directory).generic_string();
         auto content = util::read_text_file(entry.path());
         auto title = extract_title(content, entry.path().filename().string());
+        auto frequent_queries = extract_frequent_queries(content);
 
         const auto number = parse_file_number_prefix(entry.path().filename().string());
         const auto role = role_from_file_number(number);
@@ -353,25 +657,32 @@ void KnowledgeStorage::load() {
                 .filename = std::move(relative_filename),
                 .title = std::move(title),
                 .content = std::move(content),
+                .frequent_queries = std::move(frequent_queries),
                 .normalized_filename = {},
                 .normalized_title = {},
-                .normalized_content = {},
+                .normalized_frequent_queries = {},
                 .source = detect_source_type(relative_filename),
                 .role = role,
                 .policy = policy,
         };
 
-        document.normalized_filename = normalize_for_search(document.filename);
-        document.normalized_title = normalize_for_search(document.title);
-        document.normalized_content = normalize_for_search(document.content);
+        document.normalized_filename = make_search_key(document.filename);
+        document.normalized_title = make_search_key(document.title);
+        document.normalized_frequent_queries = normalize_frequent_queries(document.frequent_queries);
 
         m_documents.push_back(std::move(document));
     }
 
     std::ranges::sort(m_documents, {}, &knowledge_document_s::filename);
 
+    auto documents_without_frequent_queries = std::size_t{};
+
     for (auto index = std::size_t{}; index < m_documents.size(); ++index) {
         const auto &document = m_documents[index];
+
+        if (document.normalized_frequent_queries.empty()) {
+            ++documents_without_frequent_queries;
+        }
 
         if (document.policy) {
             m_policy_indices.push_back(index);
@@ -408,6 +719,11 @@ void KnowledgeStorage::load() {
                    m_callcenter_indices.size(),
                    m_seller_indices.size(),
                    m_beauty_admin_indices.size());
+
+    if (documents_without_frequent_queries != 0) {
+        m_logger->warn("{} knowledge files have no 'Частые запросы пользователя' section",
+                       documents_without_frequent_queries);
+    }
 }
 
 std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_view query,
@@ -416,7 +732,13 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return {};
     }
 
-    const auto terms = make_search_terms(query);
+    const auto normalized_query = make_search_key(query);
+
+    if (normalized_query.empty()) {
+        return {};
+    }
+
+    const auto terms = make_search_terms(normalized_query);
 
     if (terms.empty()) {
         return {};
@@ -424,8 +746,10 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
 
     const auto candidate_indices = make_candidate_indices(options);
 
-    auto results = std::vector<retrieved_knowledge_s>{};
-    results.reserve(std::min(options.limit * 2, candidate_indices.size()));
+    auto direct_results = std::vector<retrieved_knowledge_s>{};
+    auto ranked_results = std::vector<retrieved_knowledge_s>{};
+
+    ranked_results.reserve(std::min(options.limit * 2, candidate_indices.size()));
 
     for (const auto document_index : candidate_indices) {
         assert(document_index < m_documents.size());
@@ -436,23 +760,46 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        const auto score = score_document(document, terms);
+        if (has_exact_frequent_query_match(document, normalized_query)) {
+            direct_results.push_back(make_retrieved_document(document,
+                                                             exact_frequent_query_score,
+                                                             options.max_chars_per_document,
+                                                             knowledge_match_e::exact_frequent_query));
+            continue;
+        }
+
+        if (has_unordered_frequent_query_match(document, terms)) {
+            direct_results.push_back(make_retrieved_document(document,
+                                                             unordered_frequent_query_score,
+                                                             options.max_chars_per_document,
+                                                             knowledge_match_e::unordered_frequent_query));
+            continue;
+        }
+
+        const auto score = score_document(document, terms, normalized_query);
 
         if (score == 0) {
             continue;
         }
 
-        results.push_back(retrieved_knowledge_s{
-                .filename = document.filename,
-                .title = document.title,
-                .content = take_prefix_utf8_safe(document.content, options.max_chars_per_document),
-                .score = score,
-                .source = document.source,
-                .role = document.role,
-        });
+        ranked_results.push_back(
+                make_retrieved_document(document, score, options.max_chars_per_document, knowledge_match_e::ranked));
     }
 
-    std::ranges::sort(results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
+    if (!direct_results.empty()) {
+        std::ranges::sort(direct_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+
+            return lhs.filename < rhs.filename;
+        });
+
+        direct_results.resize(1);
+        return direct_results;
+    }
+
+    std::ranges::sort(ranked_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
         if (lhs.score != rhs.score) {
             return lhs.score > rhs.score;
         }
@@ -460,11 +807,11 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return lhs.filename < rhs.filename;
     });
 
-    if (results.size() > options.limit) {
-        results.resize(options.limit);
+    if (ranked_results.size() > options.limit) {
+        ranked_results.resize(options.limit);
     }
 
-    return results;
+    return ranked_results;
 }
 
 bool KnowledgeStorage::empty() const noexcept { return m_documents.empty(); }
@@ -513,22 +860,68 @@ std::vector<std::size_t> KnowledgeStorage::make_candidate_indices(const knowledg
 }
 
 std::size_t KnowledgeStorage::score_document(const knowledge_document_s &document,
-                                             const std::span<const std::string> terms) noexcept {
+                                             const std::span<const std::string> terms,
+                                             const std::string_view normalized_query) noexcept {
     auto score = std::size_t{};
 
-    for (const auto &term : terms) {
-        score += count_occurrences(document.normalized_content, term) * term.size();
-
-        if (document.normalized_filename.find(term) != std::string::npos) {
-            score += 50;
+    if (document.normalized_title == normalized_query) {
+        score += 768;
+    } else {
+        if (document.normalized_title.find(normalized_query) != std::string::npos) {
+            score += 384;
         }
 
-        if (document.normalized_title.find(term) != std::string::npos) {
-            score += 100;
+        if (normalized_query.find(document.normalized_title) != std::string::npos) {
+            score += 256;
+        }
+    }
+
+    for (const auto &term : terms) {
+        score += count_occurrences(document.normalized_title, term) * term.size() * 16;
+    }
+
+    for (const auto &frequent_query : document.normalized_frequent_queries) {
+        if (frequent_query.find(normalized_query) != std::string::npos) {
+            score += 384;
+        }
+
+        if (normalized_query.find(frequent_query) != std::string::npos) {
+            score += 256;
+        }
+
+        for (const auto &term : terms) {
+            score += count_occurrences(frequent_query, term) * term.size() * 8;
         }
     }
 
     return score;
+}
+
+bool KnowledgeStorage::has_exact_frequent_query_match(const knowledge_document_s &document,
+                                                      const std::string_view normalized_query) noexcept {
+    return std::ranges::any_of(document.normalized_frequent_queries,
+                               [&](const std::string &frequent_query) { return frequent_query == normalized_query; });
+}
+
+bool KnowledgeStorage::has_unordered_frequent_query_match(const knowledge_document_s &document,
+                                                          const std::span<const std::string> query_terms) noexcept {
+    if (query_terms.size() < 2) {
+        return false;
+    }
+
+    for (const auto &frequent_query : document.normalized_frequent_queries) {
+        const auto frequent_query_terms = make_search_terms(frequent_query);
+
+        if (frequent_query_terms.empty()) {
+            continue;
+        }
+
+        if (all_strong_query_terms_are_present(query_terms, frequent_query_terms)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 } // namespace stz::intern

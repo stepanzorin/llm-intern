@@ -30,9 +30,18 @@ enum class workplace_role_e {
     beauty_admin,
 };
 
+enum class knowledge_match_e {
+    none,
+    exact_frequent_query,
+    unordered_frequent_query,
+    ranked,
+};
+
 [[nodiscard]] std::string_view to_string(knowledge_source_e source) noexcept;
 
 [[nodiscard]] std::string_view to_string(workplace_role_e role) noexcept;
+
+[[nodiscard]] std::string_view to_string(knowledge_match_e match) noexcept;
 
 [[nodiscard]] workplace_role_e workplace_role_from_string(std::string_view text);
 
@@ -41,9 +50,11 @@ struct knowledge_document_s {
     std::string title = {};
     std::string content = {};
 
+    std::vector<std::string> frequent_queries = {};
+
     std::string normalized_filename = {};
     std::string normalized_title = {};
-    std::string normalized_content = {};
+    std::vector<std::string> normalized_frequent_queries = {};
 
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
@@ -58,6 +69,7 @@ struct retrieved_knowledge_s {
     std::size_t score = {};
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
+    knowledge_match_e match = knowledge_match_e::none;
 };
 
 struct knowledge_retrieve_options_s {
@@ -86,7 +98,14 @@ private:
     [[nodiscard]] std::vector<std::size_t> make_candidate_indices(const knowledge_retrieve_options_s &options) const;
 
     [[nodiscard]] static std::size_t score_document(const knowledge_document_s &document,
-                                                    std::span<const std::string> terms) noexcept;
+                                                    std::span<const std::string> terms,
+                                                    std::string_view normalized_query) noexcept;
+
+    [[nodiscard]] static bool has_exact_frequent_query_match(const knowledge_document_s &document,
+                                                             std::string_view normalized_query) noexcept;
+
+    [[nodiscard]] static bool has_unordered_frequent_query_match(const knowledge_document_s &document,
+                                                                 std::span<const std::string> query_terms) noexcept;
 
     std::filesystem::path m_directory;
     std::vector<knowledge_document_s> m_documents;

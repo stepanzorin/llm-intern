@@ -54,6 +54,10 @@ private:
     [[nodiscard]] static std::string ensure_sources_block(const std::string &answer,
                                                           std::span<const std::string> source_filenames);
 
+    [[nodiscard]] static bool can_answer_without_llm(std::span<const retrieved_knowledge_s> knowledge) noexcept;
+
+    [[nodiscard]] static std::string make_direct_answer(std::span<const retrieved_knowledge_s> knowledge);
+
     llama_server_config_s m_server_config;
     engine_config_s m_engine_config;
 
