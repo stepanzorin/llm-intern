@@ -91,9 +91,9 @@ int main() try {
                 .history_file = app_dir / "message_history.json",
                 .knowledge_directory = app_dir / "knowledge",
                 .workplace_role = workplace_role_e::beauty_admin,
-                .max_history_messages_for_request = 4,
+                .max_history_messages_for_request = 2,
                 .max_knowledge_documents = 2,
-                .max_knowledge_chars_per_document = 2500,
+                .max_knowledge_chars_per_document = 3000,
         };
 
         auto engine = LlamaEngine{

@@ -13,8 +13,7 @@ namespace stz::intern {
 
 namespace {
 
-constexpr auto service_warning_text =
-        "⚠️ В первую очередь руководствуйтесь правилами и инструкциями вашей компании или заведения.";
+constexpr auto service_warning_text = "⚠️ Бот может допускать ошибки. Рекомендуется перепроверять важную информацию.";
 
 [[nodiscard]] std::string join_source_filenames(const std::span<const std::string> source_filenames) {
     if (source_filenames.empty()) {
@@ -247,14 +246,18 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
 const ChatHistory &LlamaEngine::history() const noexcept { return m_history; }
 
 std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
-    auto prompt = std::format("Ты — AI-помощник стажёра в сфере услуг.\n"
-                              "Роль стажёра: {}.\n"
-                              "Отвечай на русском языке, просто, понятно и по делу.\n"
-                              "Используй найденные Markdown-фрагменты как главный источник регламента.\n"
-                              "Если точного ответа в фрагментах нет, прямо скажи: точный регламент не найден.\n"
-                              "Не выдумывай шаги, правила компании, скидки, возвраты, компенсации и гарантии.\n"
-                              "Формат: полноценный список понятных шагов из файла.\n",
-                              to_string(m_engine_config.workplace_role));
+    auto prompt = std::format(
+            "Ты — AI-помощник стажёра в сфере услуг.\n"
+            "Роль стажёра: {}.\n"
+            "Отвечай на русском языке, просто, понятно и по делу.\n"
+            "Если вопрос не относится к работе стажёра, обслуживанию клиентов или доступной базе знаний, "
+            "не отвечай по теме вопроса, сразу отказывай. Скажи, что бот помогает только по рабочим вопросам стажёра.\n"
+            "Используй найденные Markdown-фрагменты как главный источник регламента.\n"
+            "Если точного ответа в фрагментах нет, прямо скажи: точный регламент не найден "
+            "и составь ответ из своей базы знаний.\n"
+            "Не выдумывай шаги, правила компании, скидки, возвраты, компенсации и гарантии.\n"
+            "Формат: полноценный список понятных шагов из файла.\n",
+            to_string(m_engine_config.workplace_role));
 
     if (knowledge.empty()) {
         prompt += "\nФрагменты базы знаний не найдены.\n";
