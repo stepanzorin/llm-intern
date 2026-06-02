@@ -80,6 +80,7 @@ struct knowledge_retrieve_options_s {
     bool include_custom = true;
     std::size_t limit = 3;
     std::size_t max_chars_per_document = 3000;
+    std::size_t min_ranked_score = 512;
 };
 
 class KnowledgeStorage final {

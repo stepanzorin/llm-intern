@@ -246,8 +246,8 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     return 2;
 }
 
-[[nodiscard]] std::size_t damerau_levenshtein_distance(std::span<const char32_t> lhs,
-                                                       std::span<const char32_t> rhs,
+[[nodiscard]] std::size_t damerau_levenshtein_distance(const std::span<const char32_t> lhs,
+                                                       const std::span<const char32_t> rhs,
                                                        const std::size_t max_distance) {
     if (lhs.size() > rhs.size() + max_distance || rhs.size() > lhs.size() + max_distance) {
         return max_distance + 1;
@@ -384,6 +384,34 @@ void collapse_ascii_spaces(std::string &text) {
     return result;
 }
 
+[[nodiscard]] std::size_t utf8_codepoints_count(const std::string_view text) noexcept {
+    auto count = std::size_t{};
+
+    for (auto index = std::size_t{}; index < text.size();) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+
+        if (byte < 0x80) {
+            ++index;
+        } else if ((byte & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            index += 2;
+        } else if ((byte & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            index += 3;
+        } else if ((byte & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            index += 4;
+        } else {
+            ++index;
+        }
+
+        ++count;
+    }
+
+    return count;
+}
+
+[[nodiscard]] bool is_search_term_long_enough(const std::string_view term) noexcept {
+    return utf8_codepoints_count(term) >= 3;
+}
+
 [[nodiscard]] std::vector<std::string> make_search_terms(const std::string_view query) {
     const auto normalized = make_search_key(query);
 
@@ -405,7 +433,7 @@ void collapse_ascii_spaces(std::string &text) {
         current.push_back(ch);
     }
 
-    if (current.size() >= 3) {
+    if (is_search_term_long_enough(current)) {
         terms.push_back(std::move(current));
     }
 
@@ -423,19 +451,49 @@ void collapse_ascii_spaces(std::string &text) {
     return unique_terms;
 }
 
+[[nodiscard]] bool query_has_domain_marker(const std::span<const std::string> terms) noexcept {
+    constexpr auto domain_terms = std::array{
+            std::string_view{"yclients"},  std::string_view{"бариста"},   std::string_view{"кофе"},
+            std::string_view{"капучино"},  std::string_view{"латте"},     std::string_view{"раф"},
+            std::string_view{"эспрессо"},  std::string_view{"американо"}, std::string_view{"запись"},
+            std::string_view{"записи"},    std::string_view{"визит"},     std::string_view{"визита"},
+            std::string_view{"клиент"},    std::string_view{"клиента"},   std::string_view{"услуга"},
+            std::string_view{"услуги"},    std::string_view{"оплата"},    std::string_view{"оплаты"},
+            std::string_view{"скидка"},    std::string_view{"бонусы"},    std::string_view{"сертификат"},
+            std::string_view{"абонемент"},
+    };
+
+    return std::ranges::any_of(terms, [&](const std::string &term) {
+        return std::ranges::any_of(domain_terms, [&](const std::string_view domain_term) {
+            return typo_match_terms(term, domain_term);
+        });
+    });
+}
+
 [[nodiscard]] bool is_weak_intent_term(const std::string_view term) noexcept {
     constexpr auto weak_terms = std::array{
-            std::string_view{"yclients"}, std::string_view{"клиент"},   std::string_view{"клиента"},
-            std::string_view{"клиенту"},  std::string_view{"клиентом"}, std::string_view{"запись"},
-            std::string_view{"записи"},   std::string_view{"записью"},  std::string_view{"визит"},
-            std::string_view{"визита"},   std::string_view{"визитом"},  std::string_view{"услуга"},
-            std::string_view{"услугу"},   std::string_view{"услуги"},   std::string_view{"что"},
-            std::string_view{"как"},      std::string_view{"где"},      std::string_view{"надо"},
-            std::string_view{"нужно"},    std::string_view{"можно"},
+            std::string_view{"yclients"}, std::string_view{"что"},        std::string_view{"чем"},
+            std::string_view{"как"},      std::string_view{"где"},        std::string_view{"когда"},
+            std::string_view{"куда"},     std::string_view{"зачем"},      std::string_view{"почему"},
+            std::string_view{"кто"},      std::string_view{"кого"},       std::string_view{"кому"},
+            std::string_view{"какой"},    std::string_view{"какая"},      std::string_view{"какое"},
+            std::string_view{"какие"},    std::string_view{"от"},         std::string_view{"для"},
+            std::string_view{"про"},      std::string_view{"без"},        std::string_view{"или"},
+            std::string_view{"если"},     std::string_view{"надо"},       std::string_view{"нужно"},
+            std::string_view{"можно"},    std::string_view{"такое"},      std::string_view{"это"},
+            std::string_view{"означает"}, std::string_view{"значит"},     std::string_view{"объясни"},
+            std::string_view{"поясни"},   std::string_view{"расскажи"},   std::string_view{"подскажи"},
+            std::string_view{"помоги"},   std::string_view{"пожалуйста"},
     };
 
     return std::ranges::any_of(weak_terms,
                                [&](const std::string_view weak_term) { return typo_match_terms(term, weak_term); });
+}
+
+[[nodiscard]] std::vector<std::string> make_effective_search_terms(std::vector<std::string> terms) {
+    std::erase_if(terms, [](const std::string &term) { return is_weak_intent_term(term); });
+
+    return terms;
 }
 
 [[nodiscard]] bool contains_term(const std::span<const std::string> terms, const std::string_view term) noexcept {
@@ -445,6 +503,154 @@ void collapse_ascii_spaces(std::string &text) {
 [[nodiscard]] bool contains_term_fuzzy(const std::span<const std::string> terms,
                                        const std::string_view query_term) noexcept {
     return std::ranges::any_of(terms, [&](const std::string &term) { return typo_match_terms(query_term, term); });
+}
+
+[[nodiscard]] bool is_optional_extra_term(const std::string_view term) noexcept {
+    constexpr auto optional_terms = std::array{
+            std::string_view{"клиент"},
+            std::string_view{"клиента"},
+            std::string_view{"клиенту"},
+            std::string_view{"клиентом"},
+            std::string_view{"визит"},
+            std::string_view{"визита"},
+            std::string_view{"визитом"},
+    };
+
+    return std::ranges::any_of(optional_terms, [&](const std::string_view optional_term) {
+        return typo_match_terms(term, optional_term);
+    });
+}
+
+[[nodiscard]] std::size_t count_extra_strong_terms(const std::span<const std::string> query_terms,
+                                                   const std::span<const std::string> frequent_query_terms) noexcept {
+    auto extra_count = std::size_t{};
+
+    for (const auto &term : frequent_query_terms) {
+        if (is_weak_intent_term(term) || is_optional_extra_term(term)) {
+            continue;
+        }
+
+        if (!contains_term(query_terms, term)) {
+            ++extra_count;
+        }
+    }
+
+    return extra_count;
+}
+
+[[nodiscard]] bool all_strong_query_terms_are_present_exactly(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    auto strong_terms_count = std::size_t{};
+
+    for (const auto &term : query_terms) {
+        if (is_weak_intent_term(term)) {
+            continue;
+        }
+
+        ++strong_terms_count;
+
+        if (!contains_term(frequent_query_terms, term)) {
+            return false;
+        }
+    }
+
+    return strong_terms_count != 0;
+}
+
+[[nodiscard]] bool all_strong_query_terms_are_present_with_typos(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    auto strong_terms_count = std::size_t{};
+
+    for (const auto &term : query_terms) {
+        if (is_weak_intent_term(term)) {
+            continue;
+        }
+
+        ++strong_terms_count;
+
+        if (!contains_term_fuzzy(frequent_query_terms, term)) {
+            return false;
+        }
+    }
+
+    return strong_terms_count != 0;
+}
+
+[[nodiscard]] std::size_t score_unordered_frequent_query(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    if (!all_strong_query_terms_are_present_exactly(query_terms, frequent_query_terms)) {
+        return 0;
+    }
+
+    const auto extra_count = count_extra_strong_terms(query_terms, frequent_query_terms);
+
+    if (extra_count >= 4) {
+        return 0;
+    }
+
+    return unordered_frequent_query_score - extra_count * 64;
+}
+
+[[nodiscard]] std::size_t score_unordered_fuzzy_frequent_query(
+        const std::span<const std::string> query_terms,
+        const std::span<const std::string> frequent_query_terms) noexcept {
+    if (!all_strong_query_terms_are_present_with_typos(query_terms, frequent_query_terms)) {
+        return 0;
+    }
+
+    const auto extra_count = count_extra_strong_terms(query_terms, frequent_query_terms);
+
+    if (extra_count >= 4) {
+        return 0;
+    }
+
+    return unordered_fuzzy_frequent_query_score - extra_count * 64;
+}
+
+[[nodiscard]] std::size_t best_unordered_frequent_query_score(const knowledge_document_s &document,
+                                                              const std::span<const std::string> query_terms) noexcept {
+    if (query_terms.size() < 2) {
+        return 0;
+    }
+
+    auto best_score = std::size_t{};
+
+    for (const auto &frequent_query : document.normalized_frequent_queries) {
+        const auto frequent_query_terms = make_search_terms(frequent_query);
+
+        if (frequent_query_terms.empty()) {
+            continue;
+        }
+
+        best_score = std::max(best_score, score_unordered_frequent_query(query_terms, frequent_query_terms));
+    }
+
+    return best_score;
+}
+
+[[nodiscard]] std::size_t best_unordered_fuzzy_frequent_query_score(
+        const knowledge_document_s &document,
+        const std::span<const std::string> query_terms) noexcept {
+    if (query_terms.size() < 2) {
+        return 0;
+    }
+
+    auto best_score = std::size_t{};
+
+    for (const auto &frequent_query : document.normalized_frequent_queries) {
+        const auto frequent_query_terms = make_search_terms(frequent_query);
+
+        if (frequent_query_terms.empty()) {
+            continue;
+        }
+
+        best_score = std::max(best_score, score_unordered_fuzzy_frequent_query(query_terms, frequent_query_terms));
+    }
+
+    return best_score;
 }
 
 [[nodiscard]] bool all_strong_query_terms_are_present(
@@ -485,28 +691,6 @@ void collapse_ascii_spaces(std::string &text) {
     }
 
     return strong_terms_count != 0;
-}
-
-[[nodiscard]] std::size_t count_occurrences(std::string_view text, const std::string_view term) noexcept {
-    if (term.empty()) {
-        return 0;
-    }
-
-    auto count = std::size_t{};
-    auto position = std::size_t{};
-
-    while (true) {
-        position = text.find(term, position);
-
-        if (position == std::string_view::npos) {
-            break;
-        }
-
-        ++count;
-        position += term.size();
-    }
-
-    return count;
 }
 
 [[nodiscard]] std::string extract_title(const std::string_view content, const std::string &fallback) {
@@ -747,7 +931,7 @@ std::string_view to_string(const knowledge_match_e match) noexcept {
 }
 
 workplace_role_e workplace_role_from_string(std::string_view text) {
-    auto normalized = make_search_key(text);
+    const auto normalized = make_search_key(text);
 
     if (normalized == "all") {
         return workplace_role_e::all;
@@ -907,9 +1091,14 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return {};
     }
 
-    const auto terms = make_search_terms(normalized_query);
+    auto terms = make_effective_search_terms(make_search_terms(normalized_query));
 
     if (terms.empty()) {
+        return {};
+    }
+
+    if (!query_has_domain_marker(make_search_terms(normalized_query))) {
+        m_logger->debug("Knowledge retrieval skipped: query has no domain marker");
         return {};
     }
 
@@ -937,17 +1126,21 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        if (has_unordered_frequent_query_match(document, terms)) {
+        const auto unordered_score = best_unordered_frequent_query_score(document, terms);
+
+        if (unordered_score != 0) {
             direct_results.push_back(make_retrieved_document(document,
-                                                             unordered_frequent_query_score,
+                                                             unordered_score,
                                                              options.max_chars_per_document,
                                                              knowledge_match_e::unordered_frequent_query));
             continue;
         }
 
-        if (has_unordered_fuzzy_frequent_query_match(document, terms)) {
+        const auto unordered_fuzzy_score = best_unordered_fuzzy_frequent_query_score(document, terms);
+
+        if (unordered_fuzzy_score != 0) {
             direct_results.push_back(make_retrieved_document(document,
-                                                             unordered_fuzzy_frequent_query_score,
+                                                             unordered_fuzzy_score,
                                                              options.max_chars_per_document,
                                                              knowledge_match_e::unordered_fuzzy_frequent_query));
             continue;
@@ -955,7 +1148,14 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
 
         const auto score = score_document(document, terms, normalized_query);
 
-        if (score == 0) {
+        if (score < options.min_ranked_score) {
+            if (score != 0) {
+                m_logger->debug("Knowledge candidate rejected by score threshold: {} score={} min_score={}",
+                                document.filename,
+                                score,
+                                options.min_ranked_score);
+            }
+
             continue;
         }
 
@@ -1036,10 +1236,17 @@ std::vector<std::size_t> KnowledgeStorage::make_candidate_indices(const knowledg
     return result;
 }
 
+[[nodiscard]] std::size_t count_exact_term_occurrences(const std::span<const std::string> terms,
+                                                       const std::string_view term) noexcept {
+    return static_cast<std::size_t>(std::ranges::count(terms, term));
+}
+
 std::size_t KnowledgeStorage::score_document(const knowledge_document_s &document,
                                              const std::span<const std::string> terms,
                                              const std::string_view normalized_query) noexcept {
     auto score = std::size_t{};
+
+    const auto title_terms = make_search_terms(document.normalized_title);
 
     if (document.normalized_title == normalized_query) {
         score += 768;
@@ -1054,20 +1261,26 @@ std::size_t KnowledgeStorage::score_document(const knowledge_document_s &documen
     }
 
     for (const auto &term : terms) {
-        score += count_occurrences(document.normalized_title, term) * term.size() * 16;
+        score += count_exact_term_occurrences(title_terms, term) * term.size() * 16;
     }
 
     for (const auto &frequent_query : document.normalized_frequent_queries) {
-        if (frequent_query.find(normalized_query) != std::string::npos) {
-            score += 384;
-        }
+        const auto frequent_query_terms = make_search_terms(frequent_query);
 
-        if (normalized_query.find(frequent_query) != std::string::npos) {
-            score += 256;
+        if (frequent_query == normalized_query) {
+            score += 512;
+        } else {
+            if (frequent_query.find(normalized_query) != std::string::npos) {
+                score += 384;
+            }
+
+            if (normalized_query.find(frequent_query) != std::string::npos) {
+                score += 256;
+            }
         }
 
         for (const auto &term : terms) {
-            score += count_occurrences(frequent_query, term) * term.size() * 8;
+            score += count_exact_term_occurrences(frequent_query_terms, term) * term.size() * 8;
         }
     }
 
