@@ -23,7 +23,7 @@ struct engine_config_s {
     std::filesystem::path history_file = "message_history.json";
     std::filesystem::path knowledge_directory = "knowledge";
 
-    workplace_role_e workplace_role = workplace_role_e::all;
+    workplace_role_e workplace_role = workplace_role_e::general;
 
     std::size_t max_history_messages_for_request = 4;
     std::size_t max_knowledge_documents = 2;

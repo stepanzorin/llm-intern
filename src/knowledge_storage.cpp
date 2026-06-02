@@ -4,8 +4,8 @@
 #include <array>
 #include <cassert>
 #include <cctype>
-#include <charconv>
 #include <format>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <unordered_set>
@@ -29,75 +29,6 @@ constexpr auto unordered_fuzzy_frequent_query_score = std::size_t{900};
     });
 
     return extension == ".md" || extension == ".markdown";
-}
-
-[[nodiscard]] bool starts_with_digit_prefix(const std::string_view filename) noexcept {
-    return filename.size() >= 2 && std::isdigit(static_cast<unsigned char>(filename[0])) != 0 &&
-           std::isdigit(static_cast<unsigned char>(filename[1])) != 0;
-}
-
-[[nodiscard]] std::int32_t parse_file_number_prefix(const std::string_view filename) noexcept {
-    if (!starts_with_digit_prefix(filename)) {
-        return -1;
-    }
-
-    auto value = std::int32_t{};
-    const auto *first = filename.data();
-    const auto *last = filename.data() + 2;
-
-    const auto result = std::from_chars(first, last, value);
-
-    if (result.ec != std::errc{}) {
-        return -1;
-    }
-
-    return value;
-}
-
-[[nodiscard]] workplace_role_e role_from_file_number(const std::int32_t number) noexcept {
-    if (number == 70) {
-        return workplace_role_e::general;
-    }
-
-    if (number >= 1 && number <= 10) {
-        return workplace_role_e::barista;
-    }
-
-    if (number >= 11 && number <= 20) {
-        return workplace_role_e::cashier;
-    }
-
-    if (number >= 21 && number <= 30) {
-        return workplace_role_e::reception;
-    }
-
-    if (number >= 31 && number <= 40) {
-        return workplace_role_e::callcenter;
-    }
-
-    if (number >= 41 && number <= 50) {
-        return workplace_role_e::seller;
-    }
-
-    if (number >= 51 && number <= 60) {
-        return workplace_role_e::beauty_admin;
-    }
-
-    return workplace_role_e::general;
-}
-
-[[nodiscard]] bool is_policy_file(const std::string_view filename) noexcept {
-    return filename.find("70_llm_answer_policy") != std::string_view::npos;
-}
-
-[[nodiscard]] knowledge_source_e detect_source_type(const std::string_view relative_filename) noexcept {
-    if (relative_filename.starts_with("custom/") || relative_filename.starts_with("custom\\") ||
-        relative_filename.find("/custom/") != std::string_view::npos ||
-        relative_filename.find("\\custom\\") != std::string_view::npos) {
-        return knowledge_source_e::custom;
-    }
-
-    return knowledge_source_e::builtin;
 }
 
 void append_utf8(const char32_t codepoint, std::string &result) {
@@ -234,6 +165,30 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     return result;
 }
 
+[[nodiscard]] std::size_t utf8_codepoints_count(const std::string_view text) noexcept {
+    auto count = std::size_t{};
+
+    for (auto index = std::size_t{}; index < text.size();) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+
+        if (byte < 0x80) {
+            ++index;
+        } else if ((byte & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            index += 2;
+        } else if ((byte & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            index += 3;
+        } else if ((byte & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            index += 4;
+        } else {
+            ++index;
+        }
+
+        ++count;
+    }
+
+    return count;
+}
+
 [[nodiscard]] std::size_t max_typo_distance_for_word(const std::size_t codepoints_count) noexcept {
     if (codepoints_count < 5) {
         return 0;
@@ -263,7 +218,6 @@ void append_utf8(const char32_t codepoint, std::string &result) {
 
     for (auto i = std::size_t{1}; i <= lhs.size(); ++i) {
         current[0] = i;
-
         auto row_min = current[0];
 
         for (auto j = std::size_t{1}; j <= rhs.size(); ++j) {
@@ -384,30 +338,6 @@ void collapse_ascii_spaces(std::string &text) {
     return result;
 }
 
-[[nodiscard]] std::size_t utf8_codepoints_count(const std::string_view text) noexcept {
-    auto count = std::size_t{};
-
-    for (auto index = std::size_t{}; index < text.size();) {
-        const auto byte = static_cast<unsigned char>(text[index]);
-
-        if (byte < 0x80) {
-            ++index;
-        } else if ((byte & 0xE0) == 0xC0 && index + 1 < text.size()) {
-            index += 2;
-        } else if ((byte & 0xF0) == 0xE0 && index + 2 < text.size()) {
-            index += 3;
-        } else if ((byte & 0xF8) == 0xF0 && index + 3 < text.size()) {
-            index += 4;
-        } else {
-            ++index;
-        }
-
-        ++count;
-    }
-
-    return count;
-}
-
 [[nodiscard]] bool is_search_term_long_enough(const std::string_view term) noexcept {
     return utf8_codepoints_count(term) >= 3;
 }
@@ -422,7 +352,7 @@ void collapse_ascii_spaces(std::string &text) {
         const auto byte = static_cast<unsigned char>(ch);
 
         if (is_ascii_separator(byte)) {
-            if (current.size() >= 3) {
+            if (is_search_term_long_enough(current)) {
                 terms.push_back(std::move(current));
             }
 
@@ -439,7 +369,6 @@ void collapse_ascii_spaces(std::string &text) {
 
     auto seen = std::unordered_set<std::string>{};
     auto unique_terms = std::vector<std::string>{};
-
     unique_terms.reserve(terms.size());
 
     for (auto &term : terms) {
@@ -451,39 +380,20 @@ void collapse_ascii_spaces(std::string &text) {
     return unique_terms;
 }
 
-[[nodiscard]] bool query_has_domain_marker(const std::span<const std::string> terms) noexcept {
-    constexpr auto domain_terms = std::array{
-            std::string_view{"yclients"},  std::string_view{"бариста"},   std::string_view{"кофе"},
-            std::string_view{"капучино"},  std::string_view{"латте"},     std::string_view{"раф"},
-            std::string_view{"эспрессо"},  std::string_view{"американо"}, std::string_view{"запись"},
-            std::string_view{"записи"},    std::string_view{"визит"},     std::string_view{"визита"},
-            std::string_view{"клиент"},    std::string_view{"клиента"},   std::string_view{"услуга"},
-            std::string_view{"услуги"},    std::string_view{"оплата"},    std::string_view{"оплаты"},
-            std::string_view{"скидка"},    std::string_view{"бонусы"},    std::string_view{"сертификат"},
-            std::string_view{"абонемент"},
-    };
-
-    return std::ranges::any_of(terms, [&](const std::string &term) {
-        return std::ranges::any_of(domain_terms, [&](const std::string_view domain_term) {
-            return typo_match_terms(term, domain_term);
-        });
-    });
-}
-
 [[nodiscard]] bool is_weak_intent_term(const std::string_view term) noexcept {
     constexpr auto weak_terms = std::array{
-            std::string_view{"yclients"}, std::string_view{"что"},        std::string_view{"чем"},
-            std::string_view{"как"},      std::string_view{"где"},        std::string_view{"когда"},
-            std::string_view{"куда"},     std::string_view{"зачем"},      std::string_view{"почему"},
-            std::string_view{"кто"},      std::string_view{"кого"},       std::string_view{"кому"},
-            std::string_view{"какой"},    std::string_view{"какая"},      std::string_view{"какое"},
-            std::string_view{"какие"},    std::string_view{"от"},         std::string_view{"для"},
-            std::string_view{"про"},      std::string_view{"без"},        std::string_view{"или"},
-            std::string_view{"если"},     std::string_view{"надо"},       std::string_view{"нужно"},
-            std::string_view{"можно"},    std::string_view{"такое"},      std::string_view{"это"},
-            std::string_view{"означает"}, std::string_view{"значит"},     std::string_view{"объясни"},
-            std::string_view{"поясни"},   std::string_view{"расскажи"},   std::string_view{"подскажи"},
-            std::string_view{"помоги"},   std::string_view{"пожалуйста"},
+            std::string_view{"yclients"},   std::string_view{"что"},      std::string_view{"чем"},
+            std::string_view{"как"},        std::string_view{"где"},      std::string_view{"когда"},
+            std::string_view{"куда"},       std::string_view{"зачем"},    std::string_view{"почему"},
+            std::string_view{"кто"},        std::string_view{"кого"},     std::string_view{"кому"},
+            std::string_view{"какой"},      std::string_view{"какая"},    std::string_view{"какое"},
+            std::string_view{"какие"},      std::string_view{"для"},      std::string_view{"про"},
+            std::string_view{"без"},        std::string_view{"или"},      std::string_view{"если"},
+            std::string_view{"надо"},       std::string_view{"нужно"},    std::string_view{"можно"},
+            std::string_view{"такое"},      std::string_view{"это"},      std::string_view{"означает"},
+            std::string_view{"значит"},     std::string_view{"объясни"},  std::string_view{"поясни"},
+            std::string_view{"расскажи"},   std::string_view{"подскажи"}, std::string_view{"помоги"},
+            std::string_view{"пожалуйста"},
     };
 
     return std::ranges::any_of(weak_terms,
@@ -503,6 +413,27 @@ void collapse_ascii_spaces(std::string &text) {
 [[nodiscard]] bool contains_term_fuzzy(const std::span<const std::string> terms,
                                        const std::string_view query_term) noexcept {
     return std::ranges::any_of(terms, [&](const std::string &term) { return typo_match_terms(query_term, term); });
+}
+
+[[nodiscard]] bool query_has_domain_marker(const std::span<const std::string> terms) noexcept {
+    constexpr auto domain_terms = std::array{
+            std::string_view{"yclients"},  std::string_view{"бариста"},    std::string_view{"кофе"},
+            std::string_view{"капучино"},  std::string_view{"латте"},      std::string_view{"раф"},
+            std::string_view{"эспрессо"},  std::string_view{"американо"},  std::string_view{"запись"},
+            std::string_view{"записи"},    std::string_view{"визит"},      std::string_view{"визита"},
+            std::string_view{"клиент"},    std::string_view{"клиента"},    std::string_view{"услуга"},
+            std::string_view{"услуги"},    std::string_view{"оплата"},     std::string_view{"оплаты"},
+            std::string_view{"скидка"},    std::string_view{"бонусы"},     std::string_view{"сертификат"},
+            std::string_view{"абонемент"}, std::string_view{"молоко"},     std::string_view{"сироп"},
+            std::string_view{"напиток"},   std::string_view{"кофемашина"}, std::string_view{"холдер"},
+            std::string_view{"питчер"},    std::string_view{"смена"},      std::string_view{"жалоба"},
+    };
+
+    return std::ranges::any_of(terms, [&](const std::string &term) {
+        return std::ranges::any_of(domain_terms, [&](const std::string_view domain_term) {
+            return typo_match_terms(term, domain_term);
+        });
+    });
 }
 
 [[nodiscard]] bool is_optional_extra_term(const std::string_view term) noexcept {
@@ -653,44 +584,9 @@ void collapse_ascii_spaces(std::string &text) {
     return best_score;
 }
 
-[[nodiscard]] bool all_strong_query_terms_are_present(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> frequent_query_terms) noexcept {
-    auto strong_terms_count = std::size_t{};
-
-    for (const auto &term : query_terms) {
-        if (is_weak_intent_term(term)) {
-            continue;
-        }
-
-        ++strong_terms_count;
-
-        if (!contains_term(frequent_query_terms, term)) {
-            return false;
-        }
-    }
-
-    return strong_terms_count != 0;
-}
-
-[[nodiscard]] bool all_strong_query_terms_are_present_fuzzy(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> frequent_query_terms) noexcept {
-    auto strong_terms_count = std::size_t{};
-
-    for (const auto &term : query_terms) {
-        if (is_weak_intent_term(term)) {
-            continue;
-        }
-
-        ++strong_terms_count;
-
-        if (!contains_term_fuzzy(frequent_query_terms, term)) {
-            return false;
-        }
-    }
-
-    return strong_terms_count != 0;
+[[nodiscard]] std::size_t count_exact_term_occurrences(const std::span<const std::string> terms,
+                                                       const std::string_view term) noexcept {
+    return static_cast<std::size_t>(std::ranges::count(terms, term));
 }
 
 [[nodiscard]] std::string extract_title(const std::string_view content, const std::string &fallback) {
@@ -856,19 +752,47 @@ void remove_markdown_list_marker(std::string &line) {
     return result;
 }
 
-void append_unique_indices(std::vector<std::size_t> &target, const std::span<const std::size_t> source) {
-    auto seen = std::unordered_set<std::size_t>{};
-    seen.reserve(target.size() + source.size());
-
-    for (const auto index : target) {
-        seen.insert(index);
+[[nodiscard]] std::optional<workplace_role_e> role_from_directory_name(const std::string_view directory_name) {
+    if (directory_name == "general") {
+        return workplace_role_e::general;
     }
 
-    for (const auto index : source) {
-        if (seen.insert(index).second) {
-            target.push_back(index);
-        }
+    if (directory_name == "barista") {
+        return workplace_role_e::barista;
     }
+
+    if (directory_name == "seller") {
+        return workplace_role_e::seller;
+    }
+
+    if (directory_name == "beauty_admin") {
+        return workplace_role_e::beauty_admin;
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<workplace_role_e> role_from_relative_filename(const std::string_view relative_filename) {
+    const auto separator_position = relative_filename.find('/');
+
+    if (separator_position == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    return role_from_directory_name(relative_filename.substr(0, separator_position));
+}
+
+[[nodiscard]] knowledge_source_e detect_source_type(const std::string_view relative_filename) noexcept {
+    const auto filename_position = relative_filename.find_last_of('/');
+    const auto filename = filename_position == std::string_view::npos ? relative_filename
+                                                                      : relative_filename.substr(filename_position + 1);
+
+    if (filename.starts_with("custom_") || relative_filename.starts_with("custom/") ||
+        relative_filename.find("/custom/") != std::string_view::npos) {
+        return knowledge_source_e::custom;
+    }
+
+    return knowledge_source_e::builtin;
 }
 
 [[nodiscard]] bool is_direct_match(const knowledge_match_e match) noexcept {
@@ -905,17 +829,13 @@ std::string_view to_string(const knowledge_source_e source) noexcept {
 
 std::string_view to_string(const workplace_role_e role) noexcept {
     switch (role) {
-        case workplace_role_e::all: return "all";
         case workplace_role_e::general: return "general";
         case workplace_role_e::barista: return "barista";
-        case workplace_role_e::cashier: return "cashier";
-        case workplace_role_e::reception: return "reception";
-        case workplace_role_e::callcenter: return "callcenter";
         case workplace_role_e::seller: return "seller";
         case workplace_role_e::beauty_admin: return "beauty_admin";
     }
 
-    return "all";
+    return "general";
 }
 
 std::string_view to_string(const knowledge_match_e match) noexcept {
@@ -933,11 +853,7 @@ std::string_view to_string(const knowledge_match_e match) noexcept {
 workplace_role_e workplace_role_from_string(std::string_view text) {
     const auto normalized = make_search_key(text);
 
-    if (normalized == "all") {
-        return workplace_role_e::all;
-    }
-
-    if (normalized == "general") {
+    if (normalized == "general" || normalized == "общий") {
         return workplace_role_e::general;
     }
 
@@ -945,23 +861,13 @@ workplace_role_e workplace_role_from_string(std::string_view text) {
         return workplace_role_e::barista;
     }
 
-    if (normalized == "cashier" || normalized == "кассир") {
-        return workplace_role_e::cashier;
-    }
-
-    if (normalized == "reception" || normalized == "ресепшен" || normalized == "administrator") {
-        return workplace_role_e::reception;
-    }
-
-    if (normalized == "callcenter" || normalized == "call_center" || normalized == "коллцентр") {
-        return workplace_role_e::callcenter;
-    }
-
-    if (normalized == "seller" || normalized == "продавец") {
+    if (normalized == "seller" || normalized == "продавец" || normalized == "кассир" ||
+        normalized == "продавец кассир" || normalized == "продавец-кассир") {
         return workplace_role_e::seller;
     }
 
-    if (normalized == "beauty_admin" || normalized == "администратор салона") {
+    if (normalized == "beauty_admin" || normalized == "beauty admin" || normalized == "администратор салона" ||
+        normalized == "администратор" || normalized == "ресепшен" || normalized == "reception") {
         return workplace_role_e::beauty_admin;
     }
 
@@ -978,15 +884,6 @@ KnowledgeStorage::KnowledgeStorage(std::filesystem::path directory, std::shared_
 void KnowledgeStorage::load() {
     m_documents.clear();
 
-    m_general_indices.clear();
-    m_barista_indices.clear();
-    m_cashier_indices.clear();
-    m_reception_indices.clear();
-    m_callcenter_indices.clear();
-    m_seller_indices.clear();
-    m_beauty_admin_indices.clear();
-    m_policy_indices.clear();
-
     if (!std::filesystem::exists(m_directory)) {
         m_logger->warn("Knowledge directory does not exist: {}", m_directory.string());
         return;
@@ -998,13 +895,16 @@ void KnowledgeStorage::load() {
         }
 
         auto relative_filename = std::filesystem::relative(entry.path(), m_directory).generic_string();
+        const auto role = role_from_relative_filename(relative_filename);
+
+        if (!role.has_value()) {
+            m_logger->warn("Skipping knowledge file outside role directory: {}", relative_filename);
+            continue;
+        }
+
         auto content = util::read_text_file(entry.path());
         auto title = extract_title(content, entry.path().filename().string());
         auto frequent_queries = extract_frequent_queries(content);
-
-        const auto number = parse_file_number_prefix(entry.path().filename().string());
-        const auto role = role_from_file_number(number);
-        const auto policy = is_policy_file(relative_filename);
 
         auto document = knowledge_document_s{
                 .filename = std::move(relative_filename),
@@ -1015,8 +915,7 @@ void KnowledgeStorage::load() {
                 .normalized_title = {},
                 .normalized_frequent_queries = {},
                 .source = detect_source_type(relative_filename),
-                .role = role,
-                .policy = policy,
+                .role = *role,
         };
 
         document.normalized_filename = make_search_key(document.filename);
@@ -1028,50 +927,38 @@ void KnowledgeStorage::load() {
 
     std::ranges::sort(m_documents, {}, &knowledge_document_s::filename);
 
+    auto general_count = std::size_t{};
+    auto barista_count = std::size_t{};
+    auto seller_count = std::size_t{};
+    auto beauty_admin_count = std::size_t{};
+    auto custom_count = std::size_t{};
     auto documents_without_frequent_queries = std::size_t{};
 
-    for (auto index = std::size_t{}; index < m_documents.size(); ++index) {
-        const auto &document = m_documents[index];
-
+    for (const auto &document : m_documents) {
         if (document.normalized_frequent_queries.empty()) {
             ++documents_without_frequent_queries;
         }
 
-        if (document.policy) {
-            m_policy_indices.push_back(index);
-            continue;
+        if (document.source == knowledge_source_e::custom) {
+            ++custom_count;
         }
 
         switch (document.role) {
-            case workplace_role_e::all: [[fallthrough]];
-            case workplace_role_e::general: m_general_indices.push_back(index); break;
-
-            case workplace_role_e::barista: m_barista_indices.push_back(index); break;
-
-            case workplace_role_e::cashier: m_cashier_indices.push_back(index); break;
-
-            case workplace_role_e::reception: m_reception_indices.push_back(index); break;
-
-            case workplace_role_e::callcenter: m_callcenter_indices.push_back(index); break;
-
-            case workplace_role_e::seller: m_seller_indices.push_back(index); break;
-
-            case workplace_role_e::beauty_admin: m_beauty_admin_indices.push_back(index); break;
+            case workplace_role_e::general: ++general_count; break;
+            case workplace_role_e::barista: ++barista_count; break;
+            case workplace_role_e::seller: ++seller_count; break;
+            case workplace_role_e::beauty_admin: ++beauty_admin_count; break;
         }
     }
 
     m_logger->info("Loaded {} knowledge markdown files from '{}'", m_documents.size(), m_directory.string());
 
-    m_logger->info("Knowledge map: general={}, policy={}, barista={}, cashier={}, reception={}, callcenter={}, "
-                   "seller={}, beauty_admin={}",
-                   m_general_indices.size(),
-                   m_policy_indices.size(),
-                   m_barista_indices.size(),
-                   m_cashier_indices.size(),
-                   m_reception_indices.size(),
-                   m_callcenter_indices.size(),
-                   m_seller_indices.size(),
-                   m_beauty_admin_indices.size());
+    m_logger->info("Knowledge map: general={}, barista={}, seller={}, beauty_admin={}, custom={}",
+                   general_count,
+                   barista_count,
+                   seller_count,
+                   beauty_admin_count,
+                   custom_count);
 
     if (documents_without_frequent_queries != 0) {
         m_logger->warn("{} knowledge files have no 'Частые запросы пользователя' section",
@@ -1091,30 +978,25 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return {};
     }
 
-    auto terms = make_effective_search_terms(make_search_terms(normalized_query));
+    const auto original_terms = make_search_terms(normalized_query);
+    auto terms = make_effective_search_terms(original_terms);
 
     if (terms.empty()) {
         return {};
     }
 
-    if (!query_has_domain_marker(make_search_terms(normalized_query))) {
+    if (!query_has_domain_marker(original_terms)) {
         m_logger->debug("Knowledge retrieval skipped: query has no domain marker");
         return {};
     }
 
-    const auto candidate_indices = make_candidate_indices(options);
-
     auto direct_results = std::vector<retrieved_knowledge_s>{};
     auto ranked_results = std::vector<retrieved_knowledge_s>{};
 
-    ranked_results.reserve(std::min(options.limit * 2, candidate_indices.size()));
+    ranked_results.reserve(std::min(options.limit * 2, m_documents.size()));
 
-    for (const auto document_index : candidate_indices) {
-        assert(document_index < m_documents.size());
-
-        const auto &document = m_documents[document_index];
-
-        if (!options.include_custom && document.source == knowledge_source_e::custom) {
+    for (const auto &document : m_documents) {
+        if (!document_matches_options(document, options)) {
             continue;
         }
 
@@ -1195,50 +1077,17 @@ bool KnowledgeStorage::empty() const noexcept { return m_documents.empty(); }
 
 std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size(); }
 
-std::vector<std::size_t> KnowledgeStorage::make_candidate_indices(const knowledge_retrieve_options_s &options) const {
-    auto result = std::vector<std::size_t>{};
-
-    if (options.include_policy) {
-        append_unique_indices(result, m_policy_indices);
+bool KnowledgeStorage::document_matches_options(const knowledge_document_s &document,
+                                                const knowledge_retrieve_options_s &options) noexcept {
+    if (!options.include_custom && document.source == knowledge_source_e::custom) {
+        return false;
     }
 
-    if (options.include_general) {
-        append_unique_indices(result, m_general_indices);
+    if (document.role == options.workplace_role) {
+        return true;
     }
 
-    const auto append_role = [&](const std::vector<std::size_t> &indices) { append_unique_indices(result, indices); };
-
-    switch (options.workplace_role) {
-        case workplace_role_e::all:
-            append_role(m_barista_indices);
-            append_role(m_cashier_indices);
-            append_role(m_reception_indices);
-            append_role(m_callcenter_indices);
-            append_role(m_seller_indices);
-            append_role(m_beauty_admin_indices);
-            break;
-
-        case workplace_role_e::general: break;
-
-        case workplace_role_e::barista: append_role(m_barista_indices); break;
-
-        case workplace_role_e::cashier: append_role(m_cashier_indices); break;
-
-        case workplace_role_e::reception: append_role(m_reception_indices); break;
-
-        case workplace_role_e::callcenter: append_role(m_callcenter_indices); break;
-
-        case workplace_role_e::seller: append_role(m_seller_indices); break;
-
-        case workplace_role_e::beauty_admin: append_role(m_beauty_admin_indices); break;
-    }
-
-    return result;
-}
-
-[[nodiscard]] std::size_t count_exact_term_occurrences(const std::span<const std::string> terms,
-                                                       const std::string_view term) noexcept {
-    return static_cast<std::size_t>(std::ranges::count(terms, term));
+    return options.include_general && document.role == workplace_role_e::general;
 }
 
 std::size_t KnowledgeStorage::score_document(const knowledge_document_s &document,
@@ -1291,49 +1140,6 @@ bool KnowledgeStorage::has_exact_frequent_query_match(const knowledge_document_s
                                                       const std::string_view normalized_query) noexcept {
     return std::ranges::any_of(document.normalized_frequent_queries,
                                [&](const std::string &frequent_query) { return frequent_query == normalized_query; });
-}
-
-bool KnowledgeStorage::has_unordered_frequent_query_match(const knowledge_document_s &document,
-                                                          const std::span<const std::string> query_terms) noexcept {
-    if (query_terms.size() < 2) {
-        return false;
-    }
-
-    for (const auto &frequent_query : document.normalized_frequent_queries) {
-        const auto frequent_query_terms = make_search_terms(frequent_query);
-
-        if (frequent_query_terms.empty()) {
-            continue;
-        }
-
-        if (all_strong_query_terms_are_present(query_terms, frequent_query_terms)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool KnowledgeStorage::has_unordered_fuzzy_frequent_query_match(
-        const knowledge_document_s &document,
-        const std::span<const std::string> query_terms) noexcept {
-    if (query_terms.size() < 2) {
-        return false;
-    }
-
-    for (const auto &frequent_query : document.normalized_frequent_queries) {
-        const auto frequent_query_terms = make_search_terms(frequent_query);
-
-        if (frequent_query_terms.empty()) {
-            continue;
-        }
-
-        if (all_strong_query_terms_are_present_fuzzy(query_terms, frequent_query_terms)) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 } // namespace stz::intern

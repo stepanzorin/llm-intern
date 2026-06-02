@@ -20,12 +20,8 @@ enum class knowledge_source_e {
 };
 
 enum class workplace_role_e {
-    all,
     general,
     barista,
-    cashier,
-    reception,
-    callcenter,
     seller,
     beauty_admin,
 };
@@ -59,8 +55,6 @@ struct knowledge_document_s {
 
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
-
-    bool policy = false;
 };
 
 struct retrieved_knowledge_s {
@@ -74,9 +68,8 @@ struct retrieved_knowledge_s {
 };
 
 struct knowledge_retrieve_options_s {
-    workplace_role_e workplace_role = workplace_role_e::all;
+    workplace_role_e workplace_role = workplace_role_e::general;
     bool include_general = true;
-    bool include_policy = false;
     bool include_custom = true;
     std::size_t limit = 3;
     std::size_t max_chars_per_document = 3000;
@@ -97,7 +90,12 @@ public:
     [[nodiscard]] std::size_t size() const noexcept;
 
 private:
-    [[nodiscard]] std::vector<std::size_t> make_candidate_indices(const knowledge_retrieve_options_s &options) const;
+    std::filesystem::path m_directory;
+    std::vector<knowledge_document_s> m_documents;
+    std::shared_ptr<spdlog::logger> m_logger;
+
+    [[nodiscard]] static bool document_matches_options(const knowledge_document_s &document,
+                                                       const knowledge_retrieve_options_s &options) noexcept;
 
     [[nodiscard]] static std::size_t score_document(const knowledge_document_s &document,
                                                     std::span<const std::string> terms,
@@ -105,27 +103,6 @@ private:
 
     [[nodiscard]] static bool has_exact_frequent_query_match(const knowledge_document_s &document,
                                                              std::string_view normalized_query) noexcept;
-
-    [[nodiscard]] static bool has_unordered_frequent_query_match(const knowledge_document_s &document,
-                                                                 std::span<const std::string> query_terms) noexcept;
-
-    [[nodiscard]] static bool has_unordered_fuzzy_frequent_query_match(
-            const knowledge_document_s &document,
-            std::span<const std::string> query_terms) noexcept;
-
-    std::filesystem::path m_directory;
-    std::vector<knowledge_document_s> m_documents;
-
-    std::vector<std::size_t> m_general_indices;
-    std::vector<std::size_t> m_barista_indices;
-    std::vector<std::size_t> m_cashier_indices;
-    std::vector<std::size_t> m_reception_indices;
-    std::vector<std::size_t> m_callcenter_indices;
-    std::vector<std::size_t> m_seller_indices;
-    std::vector<std::size_t> m_beauty_admin_indices;
-    std::vector<std::size_t> m_policy_indices;
-
-    std::shared_ptr<spdlog::logger> m_logger;
 };
 
 } // namespace stz::intern

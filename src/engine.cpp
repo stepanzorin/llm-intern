@@ -187,7 +187,6 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
             knowledge_retrieve_options_s{
                     .workplace_role = m_engine_config.workplace_role,
                     .include_general = true,
-                    .include_policy = false,
                     .include_custom = true,
                     .limit = m_engine_config.max_knowledge_documents,
                     .max_chars_per_document = m_engine_config.max_knowledge_chars_per_document,
