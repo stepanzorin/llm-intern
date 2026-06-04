@@ -3,8 +3,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -20,9 +22,31 @@ enum class chat_role_e {
     assistant,
 };
 
+enum class chat_answer_kind_e {
+    unknown,
+    direct_knowledge,
+    llm,
+    policy_rejection,
+};
+
+enum class chat_message_status_e {
+    pending,
+    completed,
+    cancelled,
+    failed,
+};
+
 [[nodiscard]] std::string_view to_string(chat_role_e role) noexcept;
 
+[[nodiscard]] std::string_view to_string(chat_answer_kind_e answer_kind) noexcept;
+
+[[nodiscard]] std::string_view to_string(chat_message_status_e status) noexcept;
+
 [[nodiscard]] chat_role_e chat_role_from_string(std::string_view role);
+
+[[nodiscard]] chat_answer_kind_e chat_answer_kind_from_string(std::string_view answer_kind);
+
+[[nodiscard]] chat_message_status_e chat_message_status_from_string(std::string_view status);
 
 struct chat_message_s {
     chat_role_e role = chat_role_e::user;
@@ -32,28 +56,30 @@ struct chat_message_s {
     std::vector<std::string> source_files = {};
 };
 
-class ChatHistory final {
-public:
-    ChatHistory(std::filesystem::path filename, std::shared_ptr<spdlog::logger> logger);
-
-    void load();
-
-    void save() const;
-
-    void append(chat_message_s message);
-
-    void clear();
-
-    [[nodiscard]] std::span<const chat_message_s> messages() const noexcept;
-
-    [[nodiscard]] std::vector<chat_message_s> recent_messages(std::size_t max_count) const;
-
-    [[nodiscard]] bool empty() const noexcept;
-
-private:
-    std::filesystem::path m_filename;
-    std::vector<chat_message_s> m_messages;
-    std::shared_ptr<spdlog::logger> m_logger;
+struct chat_visible_message_s {
+    std::string content = {};
+    std::string created_at = {};
+    std::string model_content = {};
+    std::string name = {};
 };
+
+struct chat_history_entry_s {
+    std::uint64_t id = {};
+    chat_answer_kind_e answer_kind = chat_answer_kind_e::unknown;
+    chat_message_status_e status = chat_message_status_e::pending;
+
+    std::optional<chat_visible_message_s> user = std::nullopt;
+    std::optional<chat_visible_message_s> assistant = std::nullopt;
+
+    std::vector<std::string> source_files = {};
+    std::vector<std::uint64_t> relatives = {};
+};
+
+[[nodiscard]] std::vector<chat_history_entry_s> load_chat_history(const std::filesystem::path &filename,
+                                                                  const std::shared_ptr<spdlog::logger> &logger);
+
+void save_chat_history(const std::filesystem::path &filename, std::span<const chat_history_entry_s> entries);
+
+[[nodiscard]] std::uint64_t make_next_chat_entry_id(std::span<const chat_history_entry_s> entries) noexcept;
 
 } // namespace stz::intern

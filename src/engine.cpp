@@ -1,7 +1,9 @@
 #include "engine.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <format>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -61,11 +63,6 @@ constexpr auto service_warning_text = "⚠️ Бот может допускат
     util::trim(result);
 
     return result;
-}
-
-[[nodiscard]] chat_message_s make_model_visible_history_message(chat_message_s message) {
-    message.content = remove_generated_service_lines(message.content);
-    return message;
 }
 
 [[nodiscard]] bool is_markdown_heading(const std::string_view line) {
@@ -141,6 +138,33 @@ constexpr auto service_warning_text = "⚠️ Бот может допускат
     return fallback;
 }
 
+[[nodiscard]] bool is_completed_assistant_entry(const chat_history_entry_s &entry) noexcept {
+    return entry.assistant.has_value() && entry.status == chat_message_status_e::completed;
+}
+
+[[nodiscard]] bool is_completed_model_visible_entry(const chat_history_entry_s &entry) noexcept {
+    if (entry.status != chat_message_status_e::completed) {
+        return false;
+    }
+
+    return entry.user.has_value() || entry.assistant.has_value();
+}
+
+void append_unique_source_files(std::vector<std::string> &target, const std::span<const std::string> source) {
+    auto seen = std::unordered_set<std::string>{};
+    seen.reserve(target.size() + source.size());
+
+    for (const auto &filename : target) {
+        seen.insert(filename);
+    }
+
+    for (const auto &filename : source) {
+        if (seen.insert(filename).second) {
+            target.push_back(filename);
+        }
+    }
+}
+
 } // namespace
 
 LlamaEngine::LlamaEngine(llama_server_config_s server_config,
@@ -148,22 +172,25 @@ LlamaEngine::LlamaEngine(llama_server_config_s server_config,
                          const std::shared_ptr<spdlog::logger> &logger)
     : m_server_config{std::move(server_config)},
       m_engine_config{std::move(engine_config)},
-      m_history{m_engine_config.history_file, logger->clone("ChatHistory")},
       m_knowledge{m_engine_config.knowledge_directory, logger->clone("KnowledgeStorage")},
       m_client{m_server_config, logger->clone("LlamaClient")},
-      m_logger{logger->clone("LlamaEngine")} {
+      m_logger{logger->clone("LlamaEngine")},
+      m_history_logger{logger->clone("ChatHistory")} {
     assert(logger != nullptr);
 }
 
 void LlamaEngine::load() {
-    m_history.load();
+    load_history();
     m_knowledge.load();
 
     if (m_knowledge.empty()) {
         m_logger->warn("Knowledge storage is empty");
     }
 
+    rebuild_model_relatives();
+
     m_logger->info("Workplace role: {}", to_string(m_engine_config.workplace_role));
+    m_logger->info("Model relatives restored: {}", m_model_relative_ids.size());
 }
 
 std::string LlamaEngine::ask(const std::string_view user_text) {
@@ -171,16 +198,8 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
         throw std::runtime_error{"User message is empty"};
     }
 
-    auto user_message = chat_message_s{
-            .role = chat_role_e::user,
-            .name = "Я",
-            .content = std::string{user_text},
-            .created_at = util::make_local_timestamp(),
-            .source_files = {},
-    };
-
-    m_history.append(std::move(user_message));
-    m_history.save();
+    const auto user_index = append_pending_user_entry(user_text);
+    save_history();
 
     const auto knowledge = m_knowledge.retrieve(
             user_text,
@@ -190,6 +209,7 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
                     .include_custom = true,
                     .limit = m_engine_config.max_knowledge_documents,
                     .max_chars_per_document = m_engine_config.max_knowledge_chars_per_document,
+                    .min_ranked_score = m_engine_config.min_ranked_knowledge_score,
             });
 
     for (const auto &item : knowledge) {
@@ -206,43 +226,154 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
         auto answer_body = make_direct_answer(knowledge);
         auto answer = ensure_sources_block(answer_body, source_filenames);
 
-        auto assistant_message = chat_message_s{
-                .role = chat_role_e::assistant,
-                .name = "AI-бот",
-                .content = answer,
-                .created_at = util::make_local_timestamp(),
-                .source_files = std::move(source_filenames),
-        };
+        const auto user_id = m_history[user_index].id;
 
-        m_history.append(std::move(assistant_message));
-        m_history.save();
+        m_history[user_index].answer_kind = chat_answer_kind_e::direct_knowledge;
+        m_history[user_index].status = chat_message_status_e::completed;
+        m_history[user_index].relatives.clear();
+
+        auto assistant_relatives = std::vector<std::uint64_t>{user_id};
+        auto assistant_id = make_next_chat_entry_id(m_history);
+
+        m_history.push_back(chat_history_entry_s{
+                .id = assistant_id,
+                .answer_kind = chat_answer_kind_e::direct_knowledge,
+                .status = chat_message_status_e::completed,
+                .user = std::nullopt,
+                .assistant =
+                        chat_visible_message_s{
+                                .content = answer,
+                                .created_at = util::make_local_timestamp(),
+                                .model_content = answer_body,
+                                .name = "AI-бот",
+                        },
+                .source_files = source_filenames,
+                .relatives = assistant_relatives,
+        });
+
+        m_model_relative_ids = std::move(assistant_relatives);
+        m_model_relative_ids.push_back(assistant_id);
+
+        save_history();
 
         m_logger->info("Answered without LLM by direct knowledge match");
 
         return answer;
     }
 
-    const auto request_messages = build_request_messages(knowledge);
-    auto response = m_client.complete_chat(request_messages);
+    m_history[user_index].answer_kind = chat_answer_kind_e::llm;
+    m_history[user_index].relatives = m_model_relative_ids;
+    save_history();
 
-    auto source_filenames = make_source_filenames(knowledge);
-    auto answer = ensure_sources_block(response.content, source_filenames);
+    auto response_content = std::string{};
 
-    auto assistant_message = chat_message_s{
-            .role = chat_role_e::assistant,
-            .name = "AI-бот",
-            .content = answer,
-            .created_at = util::make_local_timestamp(),
-            .source_files = std::move(source_filenames),
-    };
+    try {
+        const auto request_messages = build_request_messages(m_history[user_index], knowledge);
+        auto response = m_client.complete_chat(request_messages);
+        response_content = std::move(response.content);
+    } catch (...) {
+        m_history[user_index].status = chat_message_status_e::failed;
+        save_history();
+        throw;
+    }
 
-    m_history.append(std::move(assistant_message));
-    m_history.save();
+    auto source_filenames = make_context_source_filenames(knowledge, m_history[user_index].relatives);
+
+    auto answer_body = remove_generated_service_lines(response_content);
+
+    if (answer_body.empty()) {
+        answer_body = "Не удалось получить содержательный ответ от модели.";
+    }
+
+    auto answer = ensure_sources_block(answer_body, source_filenames);
+
+    const auto user_id = m_history[user_index].id;
+
+    auto assistant_relatives = m_history[user_index].relatives;
+    assistant_relatives.push_back(user_id);
+
+    m_history[user_index].status = chat_message_status_e::completed;
+
+    auto assistant_id = make_next_chat_entry_id(m_history);
+
+    m_history.push_back(chat_history_entry_s{
+            .id = assistant_id,
+            .answer_kind = chat_answer_kind_e::llm,
+            .status = chat_message_status_e::completed,
+            .user = std::nullopt,
+            .assistant =
+                    chat_visible_message_s{
+                            .content = answer,
+                            .created_at = util::make_local_timestamp(),
+                            .model_content = answer_body,
+                            .name = "AI-бот",
+                    },
+            .source_files = source_filenames,
+            .relatives = assistant_relatives,
+    });
+
+    m_model_relative_ids = std::move(assistant_relatives);
+    m_model_relative_ids.push_back(assistant_id);
+
+    save_history();
 
     return answer;
 }
 
-const ChatHistory &LlamaEngine::history() const noexcept { return m_history; }
+std::span<const chat_history_entry_s> LlamaEngine::history() const noexcept {
+    return {m_history.data(), m_history.size()};
+}
+
+void LlamaEngine::load_history() { m_history = load_chat_history(m_engine_config.history_file, m_history_logger); }
+
+void LlamaEngine::save_history() const { save_chat_history(m_engine_config.history_file, m_history); }
+
+void LlamaEngine::rebuild_model_relatives() {
+    m_model_relative_ids.clear();
+
+    for (auto it = m_history.rbegin(); it != m_history.rend(); ++it) {
+        if (!is_completed_assistant_entry(*it)) {
+            continue;
+        }
+
+        m_model_relative_ids = it->relatives;
+        m_model_relative_ids.push_back(it->id);
+        return;
+    }
+}
+
+const chat_history_entry_s *LlamaEngine::find_history_entry(const std::uint64_t id) const noexcept {
+    const auto it = std::ranges::find_if(m_history,
+                                         [id](const chat_history_entry_s &entry) noexcept { return entry.id == id; });
+
+    if (it == m_history.end()) {
+        return nullptr;
+    }
+
+    return &*it;
+}
+
+std::size_t LlamaEngine::append_pending_user_entry(const std::string_view user_text) {
+    const auto id = make_next_chat_entry_id(m_history);
+
+    m_history.push_back(chat_history_entry_s{
+            .id = id,
+            .answer_kind = chat_answer_kind_e::unknown,
+            .status = chat_message_status_e::pending,
+            .user =
+                    chat_visible_message_s{
+                            .content = std::string{user_text},
+                            .created_at = util::make_local_timestamp(),
+                            .model_content = std::string{user_text},
+                            .name = "Я",
+                    },
+            .assistant = std::nullopt,
+            .source_files = {},
+            .relatives = {},
+    });
+
+    return m_history.size() - 1;
+}
 
 std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
     auto prompt = std::format(
@@ -273,6 +404,7 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
 }
 
 std::vector<chat_message_s> LlamaEngine::build_request_messages(
+        const chat_history_entry_s &current_user_entry,
         const std::span<const retrieved_knowledge_s> knowledge) const {
     auto messages = std::vector<chat_message_s>{};
 
@@ -284,19 +416,78 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
             .source_files = {},
     });
 
-    auto history_messages = m_history.recent_messages(m_engine_config.max_history_messages_for_request);
+    for (const auto relative_id : current_user_entry.relatives) {
+        const auto *entry = find_history_entry(relative_id);
 
-    for (auto &message : history_messages) {
-        auto model_visible_message = make_model_visible_history_message(std::move(message));
-
-        if (util::is_blank(model_visible_message.content)) {
+        if (entry == nullptr || !is_completed_model_visible_entry(*entry)) {
             continue;
         }
 
-        messages.push_back(std::move(model_visible_message));
+        if (entry->user.has_value() && !util::is_blank(entry->user->model_content)) {
+            messages.push_back(chat_message_s{
+                    .role = chat_role_e::user,
+                    .name = entry->user->name,
+                    .content = entry->user->model_content,
+                    .created_at = entry->user->created_at,
+                    .source_files = entry->source_files,
+            });
+
+            continue;
+        }
+
+        if (entry->assistant.has_value() && !util::is_blank(entry->assistant->model_content)) {
+            messages.push_back(chat_message_s{
+                    .role = chat_role_e::assistant,
+                    .name = entry->assistant->name,
+                    .content = entry->assistant->model_content,
+                    .created_at = entry->assistant->created_at,
+                    .source_files = entry->source_files,
+            });
+        }
     }
 
+    if (!current_user_entry.user.has_value()) {
+        throw std::runtime_error{"Current chat history entry is not user message"};
+    }
+
+    messages.push_back(chat_message_s{
+            .role = chat_role_e::user,
+            .name = current_user_entry.user->name,
+            .content = current_user_entry.user->model_content,
+            .created_at = current_user_entry.user->created_at,
+            .source_files = {},
+    });
+
     return messages;
+}
+
+std::vector<std::string> LlamaEngine::make_context_source_filenames(
+        const std::span<const retrieved_knowledge_s> knowledge,
+        const std::span<const std::uint64_t> relatives) const {
+    auto result = make_source_filenames(knowledge);
+
+    if (!result.empty()) {
+        return result;
+    }
+
+    return make_source_filenames_from_relatives(relatives);
+}
+
+std::vector<std::string> LlamaEngine::make_source_filenames_from_relatives(
+        const std::span<const std::uint64_t> relatives) const {
+    auto result = std::vector<std::string>{};
+
+    for (const auto relative_id : relatives) {
+        const auto *entry = find_history_entry(relative_id);
+
+        if (entry == nullptr) {
+            continue;
+        }
+
+        append_unique_source_files(result, entry->source_files);
+    }
+
+    return result;
 }
 
 std::vector<std::string> LlamaEngine::make_source_filenames(const std::span<const retrieved_knowledge_s> knowledge) {

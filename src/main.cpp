@@ -45,7 +45,7 @@ namespace {
     return load_server_config(filename);
 }
 
-void print_history(const ChatHistory &history) {
+void print_history(const std::span<const chat_history_entry_s> history) {
     if (history.empty()) {
         std::println("История сообщений пока пустая.");
         return;
@@ -53,13 +53,28 @@ void print_history(const ChatHistory &history) {
 
     std::println("Загружена история сообщений:");
 
-    for (const auto &message : history.messages()) {
-        if (message.role == chat_role_e::system) {
+    for (const auto &entry : history) {
+        if (entry.user.has_value()) {
+            std::println("\n{} [{}]", entry.user->name, entry.user->created_at);
+            std::println("{}", entry.user->content);
+
+            if (entry.status == chat_message_status_e::pending) {
+                std::println("[сообщение ожидает ответа]");
+            } else if (entry.status == chat_message_status_e::failed) {
+                std::println("[ответ не был получен из-за ошибки]");
+            } else if (entry.status == chat_message_status_e::cancelled) {
+                std::println("[генерация ответа была отменена]");
+            }
+
             continue;
         }
 
-        std::println("\n{} [{}]", message.name, message.created_at);
-        std::println("{}", message.content);
+        if (entry.assistant.has_value()) {
+            std::println("\n{} [{}]", entry.assistant->name, entry.assistant->created_at);
+            std::println("{}", entry.assistant->content);
+
+            continue;
+        }
     }
 
     std::println("");
@@ -91,7 +106,6 @@ int main() try {
                 .history_file = app_dir / "message_history.json",
                 .knowledge_directory = app_dir / "knowledge",
                 .workplace_role = workplace_role_e::beauty_admin,
-                .max_history_messages_for_request = 2,
                 .max_knowledge_documents = 2,
                 .max_knowledge_chars_per_document = 3000,
         };
