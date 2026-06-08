@@ -1,10 +1,5 @@
 add_subdirectory(util)
-
-target_sources(
-        llm_intern PRIVATE
-        llm/llama_client.cpp
-        llm/llama_client.hpp
-)
+add_subdirectory(llm)
 
 target_sources(
         llm_intern PRIVATE

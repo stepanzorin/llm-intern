@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 
 #include "util/string_helpers.hpp"
 #include "util/time.hpp"
@@ -99,6 +100,7 @@ constexpr auto service_warning_text = "⚠️ Бот может допускат
 
     while (position <= markdown.size()) {
         const auto line_end = markdown.find('\n', position);
+
         const auto line = markdown.substr(
                 position,
                 line_end == std::string_view::npos ? markdown.size() - position : line_end - position);
@@ -167,13 +169,21 @@ void append_unique_source_files(std::vector<std::string> &target, const std::spa
 
 } // namespace
 
-LlamaEngine::LlamaEngine(llama_server_config_s server_config,
-                         engine_config_s engine_config,
-                         const std::shared_ptr<spdlog::logger> &logger)
-    : m_server_config{std::move(server_config)},
-      m_engine_config{std::move(engine_config)},
-      m_knowledge{m_engine_config.knowledge_directory, logger->clone("KnowledgeStorage")},
-      m_client{m_server_config, logger->clone("LlamaClient")},
+LlamaEngine::LlamaEngine(engine_config_s config, const std::shared_ptr<spdlog::logger> &logger)
+    : m_config{std::move(config)},
+      m_server{
+              m_config.server,
+              logger->clone("LlamaServer"),
+      },
+      m_client{
+              m_server,
+              m_config.client,
+              logger->clone("LlamaClient"),
+      },
+      m_knowledge{
+              m_config.knowledge_directory,
+              logger->clone("KnowledgeStorage"),
+      },
       m_logger{logger->clone("LlamaEngine")},
       m_history_logger{logger->clone("ChatHistory")} {
     assert(logger != nullptr);
@@ -182,18 +192,25 @@ LlamaEngine::LlamaEngine(llama_server_config_s server_config,
 void LlamaEngine::load() {
     load_history();
     m_knowledge.load();
+    rebuild_model_relatives();
 
     if (m_knowledge.empty()) {
         m_logger->warn("Knowledge storage is empty");
     }
 
-    rebuild_model_relatives();
+    m_logger->info("Workplace role: {}", to_string(m_config.workplace_role));
 
-    m_logger->info("Workplace role: {}", to_string(m_engine_config.workplace_role));
     m_logger->info("Model relatives restored: {}", m_model_relative_ids.size());
+
+    start_server();
 }
 
-std::string LlamaEngine::ask(const std::string_view user_text) {
+void LlamaEngine::start_server() { m_server.start(); }
+
+void LlamaEngine::stop_server() noexcept { m_server.stop(); }
+
+engine_answer_s LlamaEngine::ask(const std::string_view user_text,
+                                 const llm::llama_stream_callback_t &stream_callback) {
     if (util::is_blank(user_text)) {
         throw std::runtime_error{"User message is empty"};
     }
@@ -204,12 +221,12 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
     const auto knowledge = m_knowledge.retrieve(
             user_text,
             knowledge_retrieve_options_s{
-                    .workplace_role = m_engine_config.workplace_role,
+                    .workplace_role = m_config.workplace_role,
                     .include_general = true,
                     .include_custom = true,
-                    .limit = m_engine_config.max_knowledge_documents,
-                    .max_chars_per_document = m_engine_config.max_knowledge_chars_per_document,
-                    .min_ranked_score = m_engine_config.min_ranked_knowledge_score,
+                    .limit = m_config.max_knowledge_documents,
+                    .max_chars_per_document = m_config.max_knowledge_chars_per_document,
+                    .min_ranked_score = m_config.min_ranked_knowledge_score,
             });
 
     for (const auto &item : knowledge) {
@@ -229,11 +246,16 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
         const auto user_id = m_history[user_index].id;
 
         m_history[user_index].answer_kind = chat_answer_kind_e::direct_knowledge;
+
         m_history[user_index].status = chat_message_status_e::completed;
+
         m_history[user_index].relatives.clear();
 
-        auto assistant_relatives = std::vector<std::uint64_t>{user_id};
-        auto assistant_id = make_next_chat_entry_id(m_history);
+        auto assistant_relatives = std::vector<std::uint64_t>{
+                user_id,
+        };
+
+        const auto assistant_id = make_next_chat_entry_id(m_history);
 
         m_history.push_back(chat_history_entry_s{
                 .id = assistant_id,
@@ -258,28 +280,52 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
 
         m_logger->info("Answered without LLM by direct knowledge match");
 
-        return answer;
+        return engine_answer_s{
+                .status = chat_message_status_e::completed,
+                .content = std::move(answer),
+        };
+    }
+
+    if (!m_server.is_running()) {
+        m_history[user_index].status = chat_message_status_e::failed;
+
+        save_history();
+
+        throw std::runtime_error{"Cannot generate answer: llama-server is not ready"};
     }
 
     m_history[user_index].answer_kind = chat_answer_kind_e::llm;
     m_history[user_index].relatives = m_model_relative_ids;
+
     save_history();
 
-    auto response_content = std::string{};
+    auto response = llm::llama_client_response_s{};
 
     try {
         const auto request_messages = build_request_messages(m_history[user_index], knowledge);
-        auto response = m_client.complete_chat(request_messages);
-        response_content = std::move(response.content);
+
+        response = m_client.complete_chat(request_messages, stream_callback);
     } catch (...) {
         m_history[user_index].status = chat_message_status_e::failed;
+
         save_history();
         throw;
     }
 
+    if (response.status == llm::llama_completion_status_e::cancelled) {
+        m_history[user_index].status = chat_message_status_e::cancelled;
+
+        save_history();
+
+        return engine_answer_s{
+                .status = chat_message_status_e::cancelled,
+                .content = std::move(response.content),
+        };
+    }
+
     auto source_filenames = make_context_source_filenames(knowledge, m_history[user_index].relatives);
 
-    auto answer_body = remove_generated_service_lines(response_content);
+    auto answer_body = remove_generated_service_lines(response.content);
 
     if (answer_body.empty()) {
         answer_body = "Не удалось получить содержательный ответ от модели.";
@@ -290,11 +336,12 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
     const auto user_id = m_history[user_index].id;
 
     auto assistant_relatives = m_history[user_index].relatives;
+
     assistant_relatives.push_back(user_id);
 
     m_history[user_index].status = chat_message_status_e::completed;
 
-    auto assistant_id = make_next_chat_entry_id(m_history);
+    const auto assistant_id = make_next_chat_entry_id(m_history);
 
     m_history.push_back(chat_history_entry_s{
             .id = assistant_id,
@@ -317,16 +364,38 @@ std::string LlamaEngine::ask(const std::string_view user_text) {
 
     save_history();
 
-    return answer;
+    return engine_answer_s{
+            .status = chat_message_status_e::completed,
+            .content = std::move(answer),
+    };
 }
+
+void LlamaEngine::stop_generating() noexcept { m_server.stop_generating(); }
+
+bool LlamaEngine::is_running() const noexcept { return m_server.is_running(); }
+
+bool LlamaEngine::model_generates() const noexcept { return m_server.model_generates(); }
+
+bool LlamaEngine::change_model(const llm::model_e model) { return m_server.change_model(model); }
+
+void LlamaEngine::store_model_cache() { m_server.store_model_cache(); }
+
+void LlamaEngine::load_model_cache() { m_server.load_model_cache(); }
+
+std::string LlamaEngine::server_url() const { return m_server.url(); }
+
+llm::llama_server_state_info_s LlamaEngine::server_state() const { return m_server.state_info(); }
 
 std::span<const chat_history_entry_s> LlamaEngine::history() const noexcept {
-    return {m_history.data(), m_history.size()};
+    return {
+            m_history.data(),
+            m_history.size(),
+    };
 }
 
-void LlamaEngine::load_history() { m_history = load_chat_history(m_engine_config.history_file, m_history_logger); }
+void LlamaEngine::load_history() { m_history = load_chat_history(m_config.history_file, m_history_logger); }
 
-void LlamaEngine::save_history() const { save_chat_history(m_engine_config.history_file, m_history); }
+void LlamaEngine::save_history() const { save_chat_history(m_config.history_file, m_history); }
 
 void LlamaEngine::rebuild_model_relatives() {
     m_model_relative_ids.clear();
@@ -387,7 +456,7 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
             "и составь ответ из своей базы знаний.\n"
             "Не выдумывай шаги, правила компании, скидки, возвраты, компенсации и гарантии.\n"
             "Формат: полноценный список понятных шагов из файла.\n",
-            to_string(m_engine_config.workplace_role));
+            to_string(m_config.workplace_role));
 
     if (knowledge.empty()) {
         prompt += "\nФрагменты базы знаний не найдены.\n";
@@ -447,7 +516,7 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
     }
 
     if (!current_user_entry.user.has_value()) {
-        throw std::runtime_error{"Current chat history entry is not user message"};
+        throw std::runtime_error{"Current chat history entry is not a user message"};
     }
 
     messages.push_back(chat_message_s{
@@ -526,9 +595,10 @@ bool LlamaEngine::can_answer_without_llm(const std::span<const retrieved_knowled
         return false;
     }
 
-    return knowledge.front().match == knowledge_match_e::exact_frequent_query ||
-           knowledge.front().match == knowledge_match_e::unordered_frequent_query ||
-           knowledge.front().match == knowledge_match_e::unordered_fuzzy_frequent_query;
+    const auto match = knowledge.front().match;
+
+    return match == knowledge_match_e::exact_frequent_query || match == knowledge_match_e::unordered_frequent_query ||
+           match == knowledge_match_e::unordered_fuzzy_frequent_query;
 }
 
 std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_knowledge_s> knowledge) {

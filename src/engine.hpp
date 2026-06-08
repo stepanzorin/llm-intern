@@ -14,13 +14,16 @@
 #include <spdlog/logger.h>
 
 #include "chat_history.hpp"
-#include "config.hpp"
 #include "knowledge_storage.hpp"
 #include "llm/llama_client.hpp"
+#include "llm/llama_server.hpp"
 
 namespace stz::intern {
 
 struct engine_config_s {
+    llm::llama_server_config_s server = {};
+    llm::llama_client_config_s client = {};
+
     std::filesystem::path history_file = "message_history.json";
     std::filesystem::path knowledge_directory = "knowledge";
 
@@ -31,32 +34,43 @@ struct engine_config_s {
     std::size_t min_ranked_knowledge_score = 512;
 };
 
+struct engine_answer_s {
+    chat_message_status_e status = chat_message_status_e::completed;
+    std::string content = {};
+};
+
 class LlamaEngine final {
 public:
-    LlamaEngine(llama_server_config_s server_config,
-                engine_config_s engine_config,
-                const std::shared_ptr<spdlog::logger> &logger);
+    LlamaEngine(engine_config_s config, const std::shared_ptr<spdlog::logger> &logger);
 
     void load();
 
-    [[nodiscard]] std::string ask(std::string_view user_text);
+    void start_server();
+
+    void stop_server() noexcept;
+
+    [[nodiscard]] engine_answer_s ask(std::string_view user_text,
+                                      const llm::llama_stream_callback_t &stream_callback = {});
+
+    void stop_generating() noexcept;
+
+    [[nodiscard]] bool is_running() const noexcept;
+
+    [[nodiscard]] bool model_generates() const noexcept;
+
+    [[nodiscard]] bool change_model(llm::model_e model);
+
+    void store_model_cache();
+
+    void load_model_cache();
+
+    [[nodiscard]] std::string server_url() const;
+
+    [[nodiscard]] llm::llama_server_state_info_s server_state() const;
 
     [[nodiscard]] std::span<const chat_history_entry_s> history() const noexcept;
 
 private:
-    llama_server_config_s m_server_config;
-    engine_config_s m_engine_config;
-
-    std::vector<chat_history_entry_s> m_history;
-    std::vector<std::uint64_t> m_model_relative_ids;
-
-    KnowledgeStorage m_knowledge;
-    LlamaClient m_client;
-
-    std::shared_ptr<spdlog::logger> m_logger;
-    std::shared_ptr<spdlog::logger> m_history_logger;
-
-
     void load_history();
 
     void save_history() const;
@@ -89,6 +103,19 @@ private:
     [[nodiscard]] static bool can_answer_without_llm(std::span<const retrieved_knowledge_s> knowledge) noexcept;
 
     [[nodiscard]] static std::string make_direct_answer(std::span<const retrieved_knowledge_s> knowledge);
+
+    engine_config_s m_config;
+
+    llm::LlamaServer m_server;
+    llm::LlamaClient m_client;
+
+    std::vector<chat_history_entry_s> m_history;
+    std::vector<std::uint64_t> m_model_relative_ids;
+
+    KnowledgeStorage m_knowledge;
+
+    std::shared_ptr<spdlog::logger> m_logger;
+    std::shared_ptr<spdlog::logger> m_history_logger;
 };
 
 } // namespace stz::intern
