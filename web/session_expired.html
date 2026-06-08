@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+    >
+
+    <meta name="color-scheme" content="light dark">
+
+    <title>Требуется повторная активация</title>
+
+    <link rel="stylesheet" href="./styles/global.css">
+    <link rel="stylesheet" href="./styles/session_expired.css">
+
+    <script src="./common.js" defer></script>
+</head>
+
+<body>
+<div
+        class="system-banner"
+        id="system-banner"
+        role="status"
+        hidden
+>
+    <div class="system-banner__inner">
+        <div class="system-banner__content">
+            <span
+                    class="system-banner__icon"
+                    aria-hidden="true"
+            >
+                ℹ️
+            </span>
+
+            <p
+                    class="system-banner__text"
+                    id="system-banner-text"
+            ></p>
+        </div>
+
+        <button
+                class="system-banner__close"
+                type="button"
+                aria-label="Закрыть уведомление"
+                data-action="close-system-banner"
+        >
+            ✕
+        </button>
+    </div>
+</div>
+
+<main class="expired-page page">
+    <section class="expired-card card">
+        <div
+                class="expired-card__icon"
+                aria-hidden="true"
+        >
+            !
+        </div>
+
+        <header class="card__header">
+            <span class="badge badge--warning">
+                Доступ приостановлен
+            </span>
+
+            <h1 class="card__title">
+                Требуется повторная активация
+            </h1>
+
+            <p class="card__description">
+                Приложение не смогло подтвердить действительность
+                подписки в течение разрешённого периода.
+                Для продолжения работы повторно введите
+                ключ активации.
+            </p>
+        </header>
+
+        <div class="expired-card__company">
+            <span class="expired-card__company-label">
+                Текущая точка
+            </span>
+
+            <strong id="company-name">
+                Название компании
+            </strong>
+
+            <span id="company-address">
+                Адрес компании
+            </span>
+        </div>
+
+        <form
+                class="expired-form"
+                id="reactivation-form"
+                action="/api/activation/recheck"
+                method="post"
+        >
+            <div
+                    class="form-message form-message--error"
+                    id="reactivation-error"
+                    role="alert"
+                    hidden
+            >
+                Не удалось подтвердить ключ активации.
+            </div>
+
+            <label class="field">
+                <span class="field__label">
+                    Ключ активации
+                </span>
+
+                <input
+                        class="input expired-form__key"
+                        id="activation-key"
+                        name="activation_key"
+                        type="text"
+                        placeholder="XXXX-XXXX-XXXX-XXXX"
+                        autocomplete="off"
+                        spellcheck="false"
+                        required
+                >
+            </label>
+
+            <div class="expired-card__internet">
+                <span
+                        class="status-dot"
+                        id="internet-status-dot"
+                        data-state="offline"
+                        aria-hidden="true"
+                ></span>
+
+                <div>
+                    <strong id="internet-status-text">
+                        Для проверки требуется интернет
+                    </strong>
+
+                    <p>
+                        Подключение будет проверено автоматически
+                        после отправки формы.
+                    </p>
+                </div>
+            </div>
+
+            <button
+                    class="button button--full"
+                    id="reactivation-submit"
+                    type="submit"
+            >
+                Проверить ключ и восстановить доступ
+            </button>
+        </form>
+
+        <footer class="expired-card__footer">
+            <a href="./report.html">
+                Сообщить о проблеме
+            </a>
+        </footer>
+    </section>
+</main>
+</body>
+</html>

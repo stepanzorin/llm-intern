@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+    >
+
+    <meta name="color-scheme" content="light dark">
+
+    <title>ИИ-помощник</title>
+
+    <link rel="stylesheet" href="./styles/global.css">
+    <link rel="stylesheet" href="./styles/chat.css">
+
+    <script src="./common.js" defer></script>
+    <script src="./chat.js" defer></script>
+</head>
+
+<body>
+<div
+        class="system-banner system-banner--warning"
+        id="system-banner"
+        role="status"
+        hidden
+>
+    <div class="system-banner__inner">
+        <div class="system-banner__content">
+            <span
+                    class="system-banner__icon"
+                    aria-hidden="true"
+            >
+                ⚠️
+            </span>
+
+            <p
+                    class="system-banner__text"
+                    id="system-banner-text"
+            >
+                Вечером будет выполнено обновление приложения.
+            </p>
+        </div>
+
+        <button
+                class="system-banner__close"
+                type="button"
+                aria-label="Закрыть уведомление"
+                data-action="close-system-banner"
+        >
+            ✕
+        </button>
+    </div>
+</div>
+
+<main class="chat-page page">
+    <section class="chat-layout">
+        <header class="chat-header">
+            <div class="chat-header__identity">
+                <div class="chat-header__brand">
+                    <span id="company-name">
+                        Название компании
+                    </span>
+
+                    <span
+                            class="badge"
+                            id="subscription-name"
+                            data-subscription-plan="FREE"
+                    >
+                        FREE · Базовая
+                    </span>
+                </div>
+
+                <div class="chat-header__status">
+                    <span
+                            class="status-dot"
+                            id="llama-server-status-dot"
+                            data-state="starting"
+                            aria-hidden="true"
+                    ></span>
+
+                    <span>
+                        ИИ бот-помощник
+                    </span>
+
+                    <span
+                            class="chat-header__status-text"
+                            id="llama-server-status-text"
+                    >
+                        Модель запускается
+                    </span>
+                </div>
+            </div>
+
+            <nav
+                    class="chat-header__actions"
+                    aria-label="Навигация"
+            >
+                <a
+                        class="button button--ghost chat-header__action"
+                        href="./report.html"
+                >
+                    Сообщить о проблеме
+                </a>
+            </nav>
+        </header>
+
+        <section
+                class="chat-window card"
+                aria-label="История общения"
+        >
+            <div
+                    class="chat-messages"
+                    id="chat-messages"
+                    role="log"
+                    aria-live="polite"
+                    aria-relevant="additions"
+            >
+                <article class="message message--assistant">
+                    <div class="message__bubble">
+                        <div class="message__content markdown">
+                            <p>
+                                ⚠️ Бот может допускать ошибки.
+                                Рекомендуется перепроверять важную информацию.
+                            </p>
+
+                            <p>
+                                Чтобы перенести запись клиента:
+                            </p>
+
+                            <ol>
+                                <li>
+                                    Откройте журнал записи.
+                                </li>
+
+                                <li>
+                                    Найдите нужную запись клиента.
+                                </li>
+
+                                <li>
+                                    Проверьте текущую дату, время и услугу.
+                                </li>
+
+                                <li>
+                                    Выберите новое свободное время.
+                                </li>
+
+                                <li>
+                                    Сохраните изменения.
+                                </li>
+                            </ol>
+
+                            <blockquote>
+                                После переноса повторите клиенту новую дату
+                                и время визита.
+                            </blockquote>
+
+                            <p>
+                                Опирался на файлы:
+                                <code>general/yclients_reschedule_record.md</code>
+                            </p>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="message message--user">
+                    <div class="message__bubble">
+                        <div class="message__content message__content--plain">
+                            А если клиент хочет перенести запись к другому мастеру?
+                        </div>
+                    </div>
+                </article>
+
+                <article class="message message--assistant">
+                    <div class="message__bubble">
+                        <div class="message__content markdown">
+                            <p>
+                                Перед переносом проверьте, что новый мастер:
+                            </p>
+
+                            <ul>
+                                <li>
+                                    выполняет выбранную услугу;
+                                </li>
+
+                                <li>
+                                    свободен в нужное время;
+                                </li>
+
+                                <li>
+                                    может принять клиента с учётом длительности услуги.
+                                </li>
+                            </ul>
+
+                            <p>
+                                После изменения сообщите клиенту имя мастера,
+                                дату, время и итоговую стоимость.
+                            </p>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="message message--user">
+                    <div class="message__bubble">
+                        <div class="message__content message__content--plain">
+                            Что делать, если нужный мастер занят?
+                        </div>
+                    </div>
+                </article>
+
+                <article class="message message--assistant">
+                    <div class="message__bubble">
+                        <div class="message__content markdown">
+                            <p>
+                                Предложите клиенту доступные варианты:
+                            </p>
+
+                            <ol>
+                                <li>
+                                    Другое свободное время у выбранного мастера.
+                                </li>
+
+                                <li>
+                                    Другого сотрудника, который выполняет эту услугу.
+                                </li>
+
+                                <li>
+                                    Ближайшую свободную дату.
+                                </li>
+                            </ol>
+
+                            <p>
+                                Не меняйте мастера или время без согласия клиента.
+                                После выбора повторите клиенту все новые данные записи.
+                            </p>
+
+                            <p>
+                                Опирался на файлы:
+                                <code>general/yclients_change_staff.md</code>,
+                                <code>general/yclients_reschedule_record.md</code>
+                            </p>
+                        </div>
+                    </div>
+                </article>
+
+                <article
+                        class="message message--assistant message--generating"
+                        id="generating-message"
+                        hidden
+                >
+                    <div class="message__bubble message__bubble--generating">
+                        <div
+                                class="typing-indicator"
+                                aria-label="Бот формирует ответ"
+                        >
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                    </div>
+                </article>
+            </div>
+
+            <footer class="chat-composer">
+                <form
+                        class="composer"
+                        id="chat-form"
+                        action="/api/chat/messages"
+                        method="post"
+                >
+                    <div class="composer__shell">
+                        <label class="composer__input-wrapper">
+                            <span class="sr-only">
+                                Сообщение
+                            </span>
+
+                            <textarea
+                                    class="composer__input"
+                                    id="chat-input"
+                                    name="message"
+                                    rows="1"
+                                    maxlength="8000"
+                                    placeholder="Напишите рабочий вопрос..."
+                                    autocomplete="off"
+                                    required
+                            ></textarea>
+                        </label>
+
+                        <div class="composer__toolbar">
+                            <div class="composer__toolbar-left">
+                                <details
+                                        class="composer-menu"
+                                        id="composer-menu"
+                                >
+                                    <summary
+                                            class="composer-menu__trigger"
+                                            aria-label="Дополнительные действия"
+                                            title="Дополнительные действия"
+                                    >
+                                        •••
+                                    </summary>
+
+                                    <div class="composer-menu__content">
+                                        <button
+                                                class="composer-menu__item"
+                                                type="button"
+                                                data-action="open-cheatsheets"
+                                        >
+                                            <span aria-hidden="true">
+                                                📘
+                                            </span>
+
+                                            Шпаргалки
+                                        </button>
+
+                                        <button
+                                                class="composer-menu__item"
+                                                type="button"
+                                                data-action="restart-server"
+                                        >
+                                            <span aria-hidden="true">
+                                                ↻
+                                            </span>
+
+                                            Рестарт
+                                        </button>
+
+                                        <a
+                                                class="composer-menu__item"
+                                                href="./settings.html"
+                                        >
+                                            <span aria-hidden="true">
+                                                ⚙
+                                            </span>
+
+                                            Настройки
+                                        </a>
+                                    </div>
+                                </details>
+                            </div>
+
+                            <div class="composer__toolbar-right">
+                                <button
+                                        class="composer__send"
+                                        id="send-message"
+                                        type="submit"
+                                        aria-label="Отправить сообщение"
+                                        title="Enter — отправить сообщение"
+                                >
+                                    <svg
+                                            width="19"
+                                            height="19"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            aria-hidden="true"
+                                    >
+                                        <path
+                                                d="M12 19V5M6.5 10.5 12 5l5.5 5.5"
+                                                stroke="currentColor"
+                                                stroke-width="2.2"
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                        />
+                                    </svg>
+                                </button>
+
+                                <button
+                                        class="composer__stop"
+                                        id="stop-generating"
+                                        type="button"
+                                        aria-label="Остановить генерацию"
+                                        title="Остановить генерацию ответа"
+                                        hidden
+                                >
+                                    <span aria-hidden="true"></span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <p class="composer__warning">
+                        ИИ чат-бот может допускать ошибки.
+                        Перепроверяйте важную информацию
+                        и руководствуйтесь правилами вашей компании.
+                    </p>
+                </form>
+            </footer>
+        </section>
+    </section>
+</main>
+
+<section
+        class="modal cheatsheets-modal"
+        id="cheatsheets-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cheatsheets-title"
+        hidden
+>
+    <button
+            class="modal__backdrop"
+            type="button"
+            aria-label="Закрыть шпаргалки"
+            data-action="close-cheatsheets"
+    ></button>
+
+    <div class="modal__panel">
+        <header class="modal__header">
+            <div>
+                <h2 id="cheatsheets-title">
+                    Шпаргалки с примерами использования
+                </h2>
+
+                <p>
+                    Нажмите на пример, чтобы вставить его
+                    в поле ввода.
+                </p>
+            </div>
+
+            <button
+                    class="modal__close"
+                    type="button"
+                    aria-label="Закрыть"
+                    data-action="close-cheatsheets"
+            >
+                ✕
+            </button>
+        </header>
+
+        <div class="modal__body">
+            <div class="cheatsheets-grid">
+                <section class="cheatsheet-group">
+                    <h3>
+                        Часто задаваемые вопросы
+                    </h3>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Как отменить запись клиента?
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Как принять оплату визита?
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Что делать, если клиент опаздывает?
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group cheatsheet-group--emergency">
+                    <h3>
+                        Для чрезвычайных ситуаций
+                    </h3>
+
+                    <p>
+                        <strong>112</strong> — единый номер помощи
+                    </p>
+
+                    <p>
+                        <strong>101</strong> — пожарная служба
+                    </p>
+
+                    <p>
+                        <strong>102 / 103</strong> — полиция / скорая
+                    </p>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Что делать при пожаре?
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Клиенту стало плохо
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Угроза безопасности
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group">
+                    <h3>
+                        Уточняющие вопросы
+                    </h3>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Уточни порядок действий
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Что обязательно проверить?
+                    </button>
+
+                    <button
+                            type="button"
+                            data-cheatsheet-text
+                    >
+                        Пример фразы для клиента
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group">
+                    <div class="cheatsheet-group__title">
+                        <h3>
+                            Свои подсказки
+                        </h3>
+
+                        <span class="badge">
+                            0 из 5
+                        </span>
+                    </div>
+
+                    <button
+                            type="button"
+                            class="cheatsheet-placeholder"
+                    >
+                        + Добавить свою подсказку
+                    </button>
+
+                    <button
+                            type="button"
+                            class="cheatsheet-placeholder"
+                    >
+                        Свободное место
+                    </button>
+
+                    <button
+                            type="button"
+                            class="cheatsheet-placeholder"
+                    >
+                        Свободное место
+                    </button>
+
+                    <p class="cheatsheet-group__hint">
+                        До пяти собственных подсказок
+                        доступны на тарифе FREE.
+                    </p>
+                </section>
+            </div>
+        </div>
+    </div>
+</section>
+</body>
+</html>

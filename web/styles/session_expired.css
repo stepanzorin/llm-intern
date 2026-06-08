@@ -1,0 +1,121 @@
+.expired-page {
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  place-items: center;
+
+  padding: 30px 16px;
+
+  background:
+          radial-gradient(
+                  circle at 50% 10%,
+                  var(--warning-soft),
+                  transparent 38%
+          ),
+          var(--background);
+}
+
+.expired-card {
+  width: min(100%, 570px);
+  padding: clamp(24px, 5vw, 42px);
+}
+
+.expired-card__icon {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 22px;
+  place-items: center;
+
+  border-radius: 18px;
+
+  background: var(--warning-soft);
+  color: var(--warning);
+
+  font-size: 29px;
+  font-weight: 850;
+}
+
+.expired-card .badge {
+  margin-bottom: 13px;
+}
+
+.expired-card__company {
+  display: grid;
+  margin-bottom: 24px;
+  padding: 14px 15px;
+
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+
+  background: var(--background-muted);
+
+  gap: 2px;
+}
+
+.expired-card__company strong {
+  font-size: 16px;
+}
+
+.expired-card__company span:last-child {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.expired-card__company-label {
+  color: var(--text-muted);
+
+  font-size: 12px;
+  font-weight: 650;
+
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.expired-form {
+  display: grid;
+  gap: 18px;
+}
+
+.expired-form__key {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.expired-card__internet {
+  display: flex;
+  align-items: flex-start;
+
+  padding: 13px 14px;
+
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+
+  gap: 12px;
+}
+
+.expired-card__internet .status-dot {
+  margin-top: 6px;
+}
+
+.expired-card__internet strong {
+  display: block;
+  font-size: 14px;
+}
+
+.expired-card__internet p {
+  margin: 2px 0 0;
+
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.expired-card__footer {
+  margin-top: 24px;
+  padding-top: 18px;
+
+  border-top: 1px solid var(--border);
+
+  font-size: 14px;
+  text-align: center;
+}

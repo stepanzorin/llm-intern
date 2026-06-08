@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+    >
+
+    <meta name="color-scheme" content="light dark">
+
+    <title>Активация ИИ-помощника</title>
+
+    <link rel="stylesheet" href="./styles/global.css">
+    <link rel="stylesheet" href="./styles/index.css">
+
+    <script src="./common.js" defer></script>
+</head>
+
+<body>
+<div
+        class="system-banner"
+        id="system-banner"
+        role="status"
+        hidden
+>
+    <div class="system-banner__inner">
+        <div class="system-banner__content">
+            <span
+                    class="system-banner__icon"
+                    aria-hidden="true"
+            >
+                ℹ️
+            </span>
+
+            <p
+                    class="system-banner__text"
+                    id="system-banner-text"
+            >
+                Доступно обновление приложения.
+            </p>
+        </div>
+
+        <button
+                class="system-banner__close"
+                type="button"
+                aria-label="Закрыть уведомление"
+                data-action="close-system-banner"
+        >
+            ✕
+        </button>
+    </div>
+</div>
+
+<main class="activation-page page">
+    <section class="activation-page__content">
+        <div class="activation-card card">
+            <header class="card__header activation-card__header">
+                <div
+                        class="activation-card__logo"
+                        aria-hidden="true"
+                >
+                    AI
+                </div>
+
+                <div>
+                    <h1 class="card__title">
+                        Активация помощника
+                    </h1>
+
+                    <p class="card__description">
+                        Укажите данные вашей точки и ключ активации.
+                        Для первичной активации требуется подключение
+                        к интернету.
+                    </p>
+                </div>
+            </header>
+
+            <form
+                    class="activation-form"
+                    id="activation-form"
+                    action="/api/activation"
+                    method="post"
+                    novalidate
+            >
+                <div
+                        class="form-message form-message--error"
+                        id="activation-error"
+                        role="alert"
+                        hidden
+                >
+                    Ключ активации не найден или больше не действует.
+                </div>
+
+                <div
+                        class="form-message form-message--success"
+                        id="activation-success"
+                        role="status"
+                        hidden
+                >
+                    Активация выполнена. Выполняется запуск модели.
+                </div>
+
+                <label class="field">
+                    <span class="field__label">
+                        Название точки
+                    </span>
+
+                    <input
+                            class="input"
+                            id="company-name"
+                            name="company_name"
+                            type="text"
+                            placeholder="Например: Салон «Лаванда»"
+                            autocomplete="organization"
+                            maxlength="120"
+                            required
+                    >
+                </label>
+
+                <label class="field">
+                    <span class="field__label field__label-row">
+                        <span>Адрес точки</span>
+
+                        <span class="field__label-hint">
+                            В идеале — как на Яндекс Картах
+                        </span>
+                    </span>
+
+                    <input
+                            class="input"
+                            id="company-address"
+                            name="company_address"
+                            type="text"
+                            placeholder="Город, улица, дом"
+                            autocomplete="street-address"
+                            maxlength="240"
+                            required
+                    >
+                </label>
+
+                <label class="field">
+                    <span class="field__label">
+                        Ключ активации
+                    </span>
+
+                    <input
+                            class="input activation-form__key"
+                            id="activation-key"
+                            name="activation_key"
+                            type="text"
+                            placeholder="XXXX-XXXX-XXXX-XXXX"
+                            autocomplete="off"
+                            autocapitalize="characters"
+                            spellcheck="false"
+                            maxlength="64"
+                            required
+                    >
+
+                    <span class="field__hint">
+                        Ключ выдаётся после подтверждения подписки.
+                    </span>
+                </label>
+
+                <button
+                        class="button button--full"
+                        id="activation-submit"
+                        type="submit"
+                >
+                    Активировать
+                </button>
+            </form>
+
+            <footer class="activation-card__footer">
+                <div class="activation-card__footer-row">
+                    <span id="application-version">
+                        Версия 1.0.0
+                    </span>
+
+                    <a href="./report.html">
+                        Сообщить о проблеме
+                    </a>
+                </div>
+
+                <p class="activation-card__developer">
+                    Разработчик: Зорин Степан Андреевич
+                </p>
+            </footer>
+        </div>
+    </section>
+</main>
+</body>
+</html>

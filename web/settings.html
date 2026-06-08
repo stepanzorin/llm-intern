@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+    >
+
+    <meta name="color-scheme" content="light dark">
+
+    <title>Настройки</title>
+
+    <link rel="stylesheet" href="./styles/global.css">
+    <link rel="stylesheet" href="./styles/settings.css">
+
+    <script src="./common.js" defer></script>
+    <script src="./settings.js" defer></script>
+</head>
+
+<body>
+<div
+        class="system-banner"
+        id="system-banner"
+        role="status"
+        hidden
+>
+    <div class="system-banner__inner">
+        <div class="system-banner__content">
+            <span
+                    class="system-banner__icon"
+                    aria-hidden="true"
+            >
+                ℹ️
+            </span>
+
+            <p
+                    class="system-banner__text"
+                    id="system-banner-text"
+            ></p>
+        </div>
+
+        <button
+                class="system-banner__close"
+                type="button"
+                aria-label="Закрыть уведомление"
+                data-action="close-system-banner"
+        >
+            ✕
+        </button>
+    </div>
+</div>
+
+<main class="settings-page page">
+    <div class="page__content">
+        <header class="settings-header">
+            <div>
+                <a
+                        class="settings-header__back"
+                        href="./chat.html"
+                >
+                    ← Вернуться в чат
+                </a>
+
+                <h1>
+                    Настройки
+                </h1>
+
+                <p>
+                    Параметры внешнего вида, модели,
+                    истории и базы знаний.
+                </p>
+            </div>
+
+            <div class="settings-header__subscription">
+                <span>
+                    Текущий тариф
+                </span>
+
+                <strong
+                        id="subscription-name"
+                        data-subscription-plan="FREE"
+                >
+                    FREE · Базовая
+                </strong>
+            </div>
+        </header>
+
+        <form
+                class="settings-form"
+                id="settings-form"
+                action="/api/settings"
+                method="post"
+        >
+            <!-- Оформление -->
+
+            <section class="settings-section card">
+                <header class="settings-section__header">
+                    <div>
+                        <h2>
+                            Оформление
+                        </h2>
+
+                        <p>
+                            Выберите один из доступных
+                            вариантов оформления интерфейса.
+                        </p>
+                    </div>
+                </header>
+
+                <fieldset class="theme-selector">
+                    <legend>
+                        Тема интерфейса
+                    </legend>
+
+                    <label class="theme-option">
+                        <input
+                                name="theme"
+                                type="radio"
+                                value="light"
+                                checked
+                        >
+
+                        <span
+                                class="theme-option__preview theme-option__preview--light"
+                        ></span>
+
+                        <span class="theme-option__name">
+                            Светлая
+                        </span>
+                    </label>
+
+                    <label class="theme-option">
+                        <input
+                                name="theme"
+                                type="radio"
+                                value="dark"
+                        >
+
+                        <span
+                                class="theme-option__preview theme-option__preview--dark"
+                        ></span>
+
+                        <span class="theme-option__name">
+                            Тёмная
+                        </span>
+                    </label>
+
+                    <label class="theme-option">
+                        <input
+                                name="theme"
+                                type="radio"
+                                value="system"
+                        >
+
+                        <span
+                                class="theme-option__preview theme-option__preview--system"
+                        ></span>
+
+                        <span class="theme-option__name">
+                            Как в системе
+                        </span>
+                    </label>
+
+                    <label
+                            class="theme-option theme-option--restricted"
+                            id="custom-theme-option"
+                            data-requires-plan="PLUS"
+                            data-locked="true"
+                    >
+                        <input
+                                id="custom-theme-input"
+                                name="theme"
+                                type="radio"
+                                value="custom"
+                                disabled
+                        >
+
+                        <span
+                                class="theme-option__preview theme-option__preview--custom"
+                        ></span>
+
+                        <span class="theme-option__name">
+                            Фирменная
+                        </span>
+
+                        <span class="theme-option__restriction">
+                            <span aria-hidden="true">
+                                🔒
+                            </span>
+
+                            PLUS
+                        </span>
+                    </label>
+                </fieldset>
+
+                <p
+                        class="plan-restriction-message"
+                        id="theme-plan-message"
+                        role="status"
+                        hidden
+                >
+                    Фирменная тема доступна на тарифах
+                    PLUS и PREMIUM.
+                </p>
+
+                <p class="settings-section__note">
+                    Фирменная тема настраивается разработчиком
+                    отдельно для конкретной компании.
+                </p>
+            </section>
+
+            <!-- Модель -->
+
+            <section class="settings-section card">
+                <header class="settings-section__header">
+                    <div>
+                        <h2>
+                            Модель
+                        </h2>
+
+                        <p>
+                            Выбор локальной модели
+                            для генерации ответов.
+                        </p>
+                    </div>
+                </header>
+
+                <div class="model-settings-row">
+                    <label class="field model-settings-row__select">
+                        <span class="field__label">
+                            Активная модель
+                        </span>
+
+                        <select
+                                class="select"
+                                id="model-select"
+                                name="model"
+                                data-requires-plan="PREMIUM"
+                                disabled
+                        >
+                            <option value="standard">
+                                Qwen 2.5 3B — стандартная
+                            </option>
+
+                            <option value="economy">
+                                Экономичная модель
+                            </option>
+
+                            <option value="premium">
+                                Расширенная модель
+                            </option>
+                        </select>
+                    </label>
+
+                    <p
+                            class="model-settings-row__hint"
+                            id="model-plan-hint"
+                    >
+                        <span
+                                class="model-settings-row__lock"
+                                aria-hidden="true"
+                        >
+                            🔒
+                        </span>
+
+                        Смена модели доступна только
+                        на тарифе PREMIUM.
+                    </p>
+                </div>
+            </section>
+
+            <!-- История сообщений -->
+
+            <section class="settings-section card">
+                <header class="settings-section__header">
+                    <div>
+                        <h2>
+                            История сообщений
+                        </h2>
+
+                        <p>
+                            Экспорт и очистка локальной
+                            истории чата.
+                        </p>
+                    </div>
+                </header>
+
+                <div class="settings-actions">
+                    <button
+                            class="button button--secondary"
+                            id="export-history"
+                            type="button"
+                            data-action="export-history"
+                            data-requires-plan="PREMIUM"
+                            disabled
+                    >
+                        Экспортировать историю
+
+                        <span
+                                class="badge"
+                                data-subscription-plan="PREMIUM"
+                        >
+                            PREMIUM · Наивысшая
+                        </span>
+                    </button>
+
+                    <button
+                            class="button button--danger"
+                            id="clear-history"
+                            type="button"
+                            data-action="clear-history"
+                    >
+                        Стереть историю
+                    </button>
+                </div>
+
+                <p class="settings-section__note">
+                    Очистка удалит историю пользователя
+                    и контекст модели.
+                </p>
+            </section>
+
+            <!-- Пользовательская база знаний -->
+
+            <section class="settings-section card">
+                <header class="settings-section__header">
+                    <div>
+                        <h2>
+                            Пользовательская база знаний
+                        </h2>
+
+                        <p>
+                            Добавляйте внутренние инструкции
+                            компании в формате Markdown.
+                        </p>
+                    </div>
+                </header>
+
+                <div class="knowledge-help">
+                    <button
+                            type="button"
+                            data-action="open-knowledge-help"
+                    >
+                        Как правильно составить Markdown-файл?
+                    </button>
+
+                    <button
+                            type="button"
+                            data-action="download-knowledge-template"
+                    >
+                        Скачать бланк для заполнения
+                    </button>
+                </div>
+
+                <div class="knowledge-upload">
+                    <label
+                            class="knowledge-upload__dropzone"
+                            id="knowledge-upload-dropzone"
+                    >
+                        <input
+                                id="knowledge-files"
+                                name="knowledge_files"
+                                type="file"
+                                accept=".md,.markdown,text/markdown"
+                                multiple
+                                hidden
+                        >
+
+                        <span
+                                class="knowledge-upload__icon"
+                                id="knowledge-upload-icon"
+                                aria-hidden="true"
+                        >
+                            +
+                        </span>
+
+                        <strong id="knowledge-upload-title">
+                            Добавить Markdown-файлы
+                        </strong>
+
+                        <span id="knowledge-upload-description">
+                            Перетащите файлы сюда
+                            или нажмите для выбора.
+                        </span>
+                    </label>
+
+                    <div
+                            class="knowledge-limit-message"
+                            id="knowledge-limit-message"
+                            role="alert"
+                            hidden
+                    >
+                        <span
+                                class="knowledge-limit-message__icon"
+                                aria-hidden="true"
+                        >
+                            🔒
+                        </span>
+
+                        <div>
+                            <strong>
+                                Для добавления четвёртого файла
+                                нужен тариф PLUS
+                            </strong>
+
+                            <p>
+                                На тарифе FREE можно добавить
+                                до трёх Markdown-файлов.
+                                На тарифах PLUS и PREMIUM —
+                                до двадцати.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div
+                            class="knowledge-validation-message"
+                            id="knowledge-validation-message"
+                            role="alert"
+                            hidden
+                    ></div>
+
+                    <div
+                            class="knowledge-files"
+                            id="knowledge-files-list"
+                            hidden
+                    ></div>
+
+                    <div
+                            class="knowledge-empty-state"
+                            id="knowledge-empty-state"
+                    >
+                        <span aria-hidden="true">
+                            📄
+                        </span>
+
+                        <p>
+                            Пользовательские файлы
+                            пока не добавлены.
+                        </p>
+                    </div>
+                </div>
+
+                <p class="settings-section__note">
+                    FREE позволяет добавить до 3 файлов.
+                    PLUS и PREMIUM — до 20 файлов.
+                </p>
+            </section>
+
+            <!-- Обновления -->
+
+            <section class="settings-section card">
+                <header class="settings-section__header">
+                    <div>
+                        <h2>
+                            Обновления
+                        </h2>
+
+                        <p>
+                            Проверка и установка новой версии
+                            приложения.
+                        </p>
+                    </div>
+                </header>
+
+                <div class="update-state">
+                    <div>
+                        <span>
+                            Текущая версия
+                        </span>
+
+                        <strong id="current-version">
+                            1.0.0
+                        </strong>
+                    </div>
+
+                    <div>
+                        <span>
+                            Последняя проверка
+                        </span>
+
+                        <strong id="last-update-check">
+                            Ещё не выполнялась
+                        </strong>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button
+                            class="button button--secondary"
+                            id="check-updates"
+                            type="button"
+                    >
+                        Проверить обновления
+                    </button>
+                </div>
+            </section>
+
+            <footer class="settings-footer">
+                <span
+                        class="form-message form-message--success"
+                        id="settings-saved"
+                        role="status"
+                        hidden
+                >
+                    Настройки сохранены.
+                </span>
+
+                <button
+                        class="button"
+                        id="save-settings"
+                        type="submit"
+                >
+                    Сохранить настройки
+                </button>
+            </footer>
+        </form>
+    </div>
+</main>
+
+<!-- Инструкция по Markdown -->
+
+<section
+        class="modal"
+        id="knowledge-help-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="knowledge-help-title"
+        hidden
+>
+    <button
+            class="modal__backdrop"
+            type="button"
+            data-action="close-knowledge-help"
+            aria-label="Закрыть инструкцию"
+    ></button>
+
+    <div class="modal__panel">
+        <header class="modal__header">
+            <div>
+                <h2 id="knowledge-help-title">
+                    Оформление Markdown-файла
+                </h2>
+
+                <p>
+                    Рекомендуемая структура для точного
+                    поиска инструкции.
+                </p>
+            </div>
+
+            <button
+                    class="modal__close"
+                    type="button"
+                    data-action="close-knowledge-help"
+                    aria-label="Закрыть"
+            >
+                ✕
+            </button>
+        </header>
+
+        <div class="modal__body knowledge-help-grid">
+            <section>
+                <h3>
+                    Markdown-шаблон
+                </h3>
+
+                <pre><code># Название инструкции
+
+## Частые запросы пользователя
+
+пример запроса пользователя
+другая формулировка запроса
+
+## Пошаговая инструкция что делать
+
+Важно:
+
+* Первое важное правило.
+* Второе важное правило.
+
+Инструкция:
+
+1. Первый шаг.
+2. Второй шаг.
+3. Проверка результата.</code></pre>
+            </section>
+
+            <section>
+                <h3>
+                    Небольшой пример
+                </h3>
+
+                <pre><code># Отмена записи клиента
+
+## Частые запросы пользователя
+
+отменить запись клиента
+клиент отменил визит
+
+## Пошаговая инструкция что делать
+
+Важно:
+
+* Проверь правильную запись.
+* Не обещай возврат без регламента.
+
+Инструкция:
+
+1. Найди запись клиента.
+2. Проверь дату и услугу.
+3. Подтверди отмену.
+4. Проверь освобождение времени.</code></pre>
+            </section>
+        </div>
+
+        <footer class="modal__footer">
+            <button
+                    class="button button--secondary"
+                    type="button"
+                    data-action="download-knowledge-template"
+            >
+                Скачать бланк
+            </button>
+
+            <button
+                    class="button"
+                    type="button"
+                    data-action="close-knowledge-help"
+            >
+                Понятно
+            </button>
+        </footer>
+    </div>
+</section>
+</body>
+</html>

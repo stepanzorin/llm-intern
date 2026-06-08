@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+    <meta charset="utf-8">
+
+    <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
+    >
+
+    <meta name="color-scheme" content="light dark">
+
+    <title>Сообщить о проблеме</title>
+
+    <link rel="stylesheet" href="./styles/global.css">
+    <link rel="stylesheet" href="./styles/report.css">
+
+    <script src="./common.js" defer></script>
+</head>
+
+<body>
+<div
+        class="system-banner"
+        id="system-banner"
+        role="status"
+        hidden
+>
+    <div class="system-banner__inner">
+        <div class="system-banner__content">
+            <span
+                    class="system-banner__icon"
+                    aria-hidden="true"
+            >
+                ℹ️
+            </span>
+
+            <p
+                    class="system-banner__text"
+                    id="system-banner-text"
+            ></p>
+        </div>
+
+        <button
+                class="system-banner__close"
+                type="button"
+                aria-label="Закрыть уведомление"
+                data-action="close-system-banner"
+        >
+            ✕
+        </button>
+    </div>
+</div>
+
+<main class="report-page page">
+    <div class="report-page__content">
+        <header class="report-header">
+            <button
+                    class="report-header__back"
+                    type="button"
+                    data-action="go-back"
+            >
+                ← Назад
+            </button>
+
+            <h1>
+                Сообщить о проблеме
+            </h1>
+
+            <p>
+                Опишите ошибку или пожелание. Технические данные
+                приложения будут приложены автоматически.
+            </p>
+        </header>
+
+        <section class="report-card card">
+            <form
+                    class="report-form"
+                    id="report-form"
+                    action="/api/report"
+                    method="post"
+            >
+                <div
+                        class="form-message form-message--error"
+                        id="report-error"
+                        role="alert"
+                        hidden
+                >
+                    Не удалось отправить сообщение.
+                    Проверьте подключение к интернету.
+                </div>
+
+                <div
+                        class="form-message form-message--success"
+                        id="report-success"
+                        role="status"
+                        hidden
+                >
+                    Сообщение отправлено. Спасибо!
+                </div>
+
+                <label class="field">
+                    <span class="field__label">
+                        Тип обращения
+                    </span>
+
+                    <select
+                            class="select"
+                            id="report-category"
+                            name="category"
+                            required
+                    >
+                        <option
+                                value=""
+                                selected
+                                disabled
+                        >
+                            Выберите категорию
+                        </option>
+
+                        <option value="bug">
+                            Ошибка в работе приложения
+                        </option>
+
+                        <option value="answer">
+                            Некорректный ответ бота
+                        </option>
+
+                        <option value="performance">
+                            Медленная работа
+                        </option>
+
+                        <option value="activation">
+                            Проблема с активацией
+                        </option>
+
+                        <option value="update">
+                            Проблема с обновлением
+                        </option>
+
+                        <option value="suggestion">
+                            Предложение
+                        </option>
+
+                        <option value="other">
+                            Другое
+                        </option>
+                    </select>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">
+                        Тема
+                    </span>
+
+                    <input
+                            class="input"
+                            id="report-subject"
+                            name="subject"
+                            type="text"
+                            placeholder="Кратко опишите проблему"
+                            maxlength="160"
+                            required
+                    >
+                </label>
+
+                <label class="field">
+                    <span class="field__label">
+                        Описание
+                    </span>
+
+                    <textarea
+                            class="textarea report-form__description"
+                            id="report-description"
+                            name="description"
+                            placeholder="Что произошло, чего вы ожидали и что получили..."
+                            maxlength="10000"
+                            required
+                    ></textarea>
+
+                    <span class="field__hint">
+                        Не указывайте пароли, ключи активации
+                        и персональные данные клиентов.
+                    </span>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">
+                        Как повторить проблему
+
+                        <span class="report-form__optional">
+                            необязательно
+                        </span>
+                    </span>
+
+                    <textarea
+                            class="textarea"
+                            id="report-steps"
+                            name="steps"
+                            placeholder="1. Открыл страницу...&#10;2. Нажал...&#10;3. Появилась ошибка..."
+                            maxlength="6000"
+                    ></textarea>
+                </label>
+
+                <div class="report-form__actions">
+                    <button
+                            class="button button--secondary"
+                            type="button"
+                            data-action="go-back"
+                    >
+                        Отмена
+                    </button>
+
+                    <button
+                            class="button"
+                            id="report-submit"
+                            type="submit"
+                    >
+                        Отправить сообщение
+                    </button>
+                </div>
+            </form>
+        </section>
+    </div>
+</main>
+</body>
+</html>

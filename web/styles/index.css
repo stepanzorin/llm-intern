@@ -1,0 +1,127 @@
+.activation-page {
+    display: grid;
+    min-height: 100vh;
+    min-height: 100dvh;
+    place-items: center;
+    padding: 48px 16px;
+
+    background:
+            radial-gradient(
+                    circle at 15% 20%,
+                    var(--accent-soft),
+                    transparent 32%
+            ),
+            radial-gradient(
+                    circle at 85% 85%,
+                    var(--info-soft),
+                    transparent 30%
+            ),
+            var(--background);
+}
+
+.activation-page__content {
+    width: min(100%, 520px);
+}
+
+.activation-card {
+    padding: clamp(24px, 5vw, 42px);
+}
+
+.activation-card__header {
+    display: flex;
+    align-items: flex-start;
+    gap: 18px;
+}
+
+.activation-card__logo {
+    display: grid;
+    width: 54px;
+    height: 54px;
+    flex: 0 0 auto;
+    place-items: center;
+
+    border-radius: 17px;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    box-shadow: 0 10px 28px var(--accent-soft);
+
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+}
+
+.activation-form {
+    display: grid;
+    gap: 18px;
+}
+
+.activation-form__key {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.field__label-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.field__label-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 400;
+    text-align: right;
+}
+
+.activation-card__footer {
+    margin-top: 26px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.activation-card__footer-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.activation-card__developer {
+    margin: 13px 0 0;
+
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+
+    opacity: 0.68;
+}
+
+@media (max-width: 520px) {
+    .activation-page {
+        align-items: start;
+        padding: 18px 10px;
+    }
+
+    .activation-card__header {
+        display: grid;
+    }
+
+    .field__label-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .field__label-hint {
+        text-align: left;
+    }
+
+    .activation-card__footer-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+    }
+}
