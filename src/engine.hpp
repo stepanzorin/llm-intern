@@ -36,18 +36,27 @@ struct engine_config_s {
 
 struct engine_answer_s {
     chat_message_status_e status = chat_message_status_e::completed;
+
     std::string content = {};
 };
 
-class LlamaEngine final {
+class LlamaEngine {
 public:
-    LlamaEngine(engine_config_s config, const std::shared_ptr<spdlog::logger> &logger);
+    LlamaEngine(engine_config_s config,
+                llm::llama_server_config_s server_config,
+                const std::shared_ptr<spdlog::logger> &logger);
+
+    LlamaEngine(const LlamaEngine &) = delete;
+    LlamaEngine &operator=(const LlamaEngine &) = delete;
+
+    LlamaEngine(LlamaEngine &&) = delete;
+    LlamaEngine &operator=(LlamaEngine &&) = delete;
 
     void load();
 
-    void start_server();
+    void start();
 
-    void stop_server() noexcept;
+    void stop() noexcept;
 
     [[nodiscard]] engine_answer_s ask(std::string_view user_text,
                                       const llm::llama_stream_callback_t &stream_callback = {});
@@ -70,10 +79,14 @@ public:
 
     [[nodiscard]] std::span<const chat_history_entry_s> history() const noexcept;
 
+    void clear_history();
+
 private:
     void load_history();
 
     void save_history() const;
+
+    void finalize_interrupted_history_entries();
 
     void rebuild_model_relatives();
 
@@ -97,7 +110,7 @@ private:
     [[nodiscard]] static std::vector<std::string> make_source_filenames(
             std::span<const retrieved_knowledge_s> knowledge);
 
-    [[nodiscard]] static std::string ensure_sources_block(const std::string &answer,
+    [[nodiscard]] static std::string ensure_sources_block(std::string answer,
                                                           std::span<const std::string> source_filenames);
 
     [[nodiscard]] static bool can_answer_without_llm(std::span<const retrieved_knowledge_s> knowledge) noexcept;
@@ -105,6 +118,9 @@ private:
     [[nodiscard]] static std::string make_direct_answer(std::span<const retrieved_knowledge_s> knowledge);
 
     engine_config_s m_config;
+
+    std::shared_ptr<spdlog::logger> m_logger;
+    std::shared_ptr<spdlog::logger> m_history_logger;
 
     llm::LlamaServer m_server;
     llm::LlamaClient m_client;
@@ -114,8 +130,7 @@ private:
 
     KnowledgeStorage m_knowledge;
 
-    std::shared_ptr<spdlog::logger> m_logger;
-    std::shared_ptr<spdlog::logger> m_history_logger;
+    bool m_loaded = false;
 };
 
 } // namespace stz::intern

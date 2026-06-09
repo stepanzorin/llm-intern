@@ -794,17 +794,17 @@ LlamaServerSession::LlamaServerSession(LlamaServer &server,
       m_generation_id{generation_id},
       m_slot_id{slot_id} {}
 
-llama_server_config_s load_server_config(const std::filesystem::path &filename,
-                                         std::filesystem::path application_directory) try {
-    if (filename.empty()) {
-        throw std::runtime_error{"Server config filename must not be empty"};
-    }
-
+llama_server_config_s load_server_config(std::filesystem::path application_directory,
+                                         const std::filesystem::path &filename) try {
     if (application_directory.empty()) {
         throw std::runtime_error{"Application directory must not be empty"};
     }
 
-    const auto content = util::read_text_file(filename);
+    if (filename.empty()) {
+        throw std::runtime_error{"Server config filename must not be empty"};
+    }
+
+    const auto content = util::read_text_file(application_directory / filename);
 
     if (content.empty()) {
         throw std::runtime_error{"Server config file is empty"};
@@ -1537,6 +1537,7 @@ std::vector<std::string> LlamaServer::make_server_arguments(const llama_model_co
 
     if (m_config.disable_builtin_ui) {
         arguments.emplace_back("--no-ui");
+        arguments.emplace_back("--no-webui");
     }
 
     if (m_config.endpoint.api_key.has_value() && !m_config.endpoint.api_key->empty()) {

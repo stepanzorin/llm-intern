@@ -12,11 +12,25 @@
 
     <title>ИИ-помощник</title>
 
-    <link rel="stylesheet" href="./styles/global.css">
-    <link rel="stylesheet" href="./styles/chat.css">
+    <link
+            rel="stylesheet"
+            href="/styles/global.css"
+    >
 
-    <script src="./common.js" defer></script>
-    <script src="./chat.js" defer></script>
+    <link
+            rel="stylesheet"
+            href="/styles/chat.css"
+    >
+
+    <!--
+        defer сохраняет порядок выполнения:
+        1. common.js
+        2. app.js
+        3. chat.js
+    -->
+    <script src="/common.js" defer></script>
+    <script src="/app.js" defer></script>
+    <script src="/chat.js" defer></script>
 </head>
 
 <body>
@@ -59,16 +73,20 @@
         <header class="chat-header">
             <div class="chat-header__identity">
                 <div class="chat-header__brand">
-                    <span id="company-name">
+                    <span
+                            id="company-name"
+                            data-company-name
+                    >
                         Название компании
                     </span>
 
                     <span
                             class="badge"
                             id="subscription-name"
+                            data-subscription
                             data-subscription-plan="FREE"
                     >
-                        FREE · Базовая
+                        FREE
                     </span>
                 </div>
 
@@ -76,17 +94,20 @@
                     <span
                             class="status-dot"
                             id="llama-server-status-dot"
-                            data-state="starting"
+                            data-server-status-dot
+                            data-status="starting"
                             aria-hidden="true"
+                            title="Модель запускается"
                     ></span>
 
-                    <span>
-                        ИИ бот-помощник
+                    <span data-server-status-text>
+                        ИИ бот-помощник запускается
                     </span>
 
                     <span
                             class="chat-header__status-text"
                             id="llama-server-status-text"
+                            aria-live="polite"
                     >
                         Модель запускается
                     </span>
@@ -99,7 +120,7 @@
             >
                 <a
                         class="button button--ghost chat-header__action"
-                        href="./report.html"
+                        href="/report.html"
                 >
                     Сообщить о проблеме
                 </a>
@@ -116,143 +137,26 @@
                     role="log"
                     aria-live="polite"
                     aria-relevant="additions"
+                    aria-busy="false"
             >
-                <article class="message message--assistant">
-                    <div class="message__bubble">
-                        <div class="message__content markdown">
-                            <p>
-                                ⚠️ Бот может допускать ошибки.
-                                Рекомендуется перепроверять важную информацию.
-                            </p>
+                <!--
+                    Реальные сообщения будут загружены из:
 
-                            <p>
-                                Чтобы перенести запись клиента:
-                            </p>
+                    GET /api/chat/history
 
-                            <ol>
-                                <li>
-                                    Откройте журнал записи.
-                                </li>
-
-                                <li>
-                                    Найдите нужную запись клиента.
-                                </li>
-
-                                <li>
-                                    Проверьте текущую дату, время и услугу.
-                                </li>
-
-                                <li>
-                                    Выберите новое свободное время.
-                                </li>
-
-                                <li>
-                                    Сохраните изменения.
-                                </li>
-                            </ol>
-
-                            <blockquote>
-                                После переноса повторите клиенту новую дату
-                                и время визита.
-                            </blockquote>
-
-                            <p>
-                                Опирался на файлы:
-                                <code>general/yclients_reschedule_record.md</code>
-                            </p>
-                        </div>
-                    </div>
-                </article>
-
-                <article class="message message--user">
-                    <div class="message__bubble">
-                        <div class="message__content message__content--plain">
-                            А если клиент хочет перенести запись к другому мастеру?
-                        </div>
-                    </div>
-                </article>
-
-                <article class="message message--assistant">
-                    <div class="message__bubble">
-                        <div class="message__content markdown">
-                            <p>
-                                Перед переносом проверьте, что новый мастер:
-                            </p>
-
-                            <ul>
-                                <li>
-                                    выполняет выбранную услугу;
-                                </li>
-
-                                <li>
-                                    свободен в нужное время;
-                                </li>
-
-                                <li>
-                                    может принять клиента с учётом длительности услуги.
-                                </li>
-                            </ul>
-
-                            <p>
-                                После изменения сообщите клиенту имя мастера,
-                                дату, время и итоговую стоимость.
-                            </p>
-                        </div>
-                    </div>
-                </article>
-
-                <article class="message message--user">
-                    <div class="message__bubble">
-                        <div class="message__content message__content--plain">
-                            Что делать, если нужный мастер занят?
-                        </div>
-                    </div>
-                </article>
-
-                <article class="message message--assistant">
-                    <div class="message__bubble">
-                        <div class="message__content markdown">
-                            <p>
-                                Предложите клиенту доступные варианты:
-                            </p>
-
-                            <ol>
-                                <li>
-                                    Другое свободное время у выбранного мастера.
-                                </li>
-
-                                <li>
-                                    Другого сотрудника, который выполняет эту услугу.
-                                </li>
-
-                                <li>
-                                    Ближайшую свободную дату.
-                                </li>
-                            </ol>
-
-                            <p>
-                                Не меняйте мастера или время без согласия клиента.
-                                После выбора повторите клиенту все новые данные записи.
-                            </p>
-
-                            <p>
-                                Опирался на файлы:
-                                <code>general/yclients_change_staff.md</code>,
-                                <code>general/yclients_reschedule_record.md</code>
-                            </p>
-                        </div>
-                    </div>
-                </article>
+                    и добавлены сюда через chat.js.
+                -->
 
                 <article
                         class="message message--assistant message--generating"
                         id="generating-message"
+                        aria-label="Бот формирует ответ"
                         hidden
                 >
                     <div class="message__bubble message__bubble--generating">
                         <div
                                 class="typing-indicator"
-                                aria-label="Бот формирует ответ"
+                                aria-hidden="true"
                         >
                             <span></span>
                             <span></span>
@@ -266,8 +170,7 @@
                 <form
                         class="composer"
                         id="chat-form"
-                        action="/api/chat/messages"
-                        method="post"
+                        autocomplete="off"
                 >
                     <div class="composer__shell">
                         <label class="composer__input-wrapper">
@@ -283,6 +186,7 @@
                                     maxlength="8000"
                                     placeholder="Напишите рабочий вопрос..."
                                     autocomplete="off"
+                                    spellcheck="true"
                                     required
                             ></textarea>
                         </label>
@@ -316,19 +220,21 @@
 
                                         <button
                                                 class="composer-menu__item"
+                                                id="restart-server"
                                                 type="button"
                                                 data-action="restart-server"
+                                                title="Перезапустить локальный сервер модели"
                                         >
                                             <span aria-hidden="true">
                                                 ↻
                                             </span>
 
-                                            Рестарт
+                                            Перезапустить модель
                                         </button>
 
                                         <a
                                                 class="composer-menu__item"
-                                                href="./settings.html"
+                                                href="/settings.html"
                                         >
                                             <span aria-hidden="true">
                                                 ⚙

@@ -85,8 +85,8 @@ struct llama_server_config_s {
     std::vector<std::string> extra_arguments = {};
 };
 
-[[nodiscard]] llama_server_config_s load_server_config(const std::filesystem::path &filename,
-                                                       std::filesystem::path application_directory);
+[[nodiscard]] llama_server_config_s load_server_config(std::filesystem::path application_directory,
+                                                       const std::filesystem::path &filename);
 
 void validate_server_config(const llama_server_config_s &config);
 
