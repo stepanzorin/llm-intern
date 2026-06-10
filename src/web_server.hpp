@@ -102,6 +102,8 @@ private:
 
     void handle_post_stop_generation(const httplib::Request &request, httplib::Response &response);
 
+    void handle_post_restart_server(const httplib::Request &request, httplib::Response &response);
+
     void handle_delete_chat_history(const httplib::Request &request, httplib::Response &response);
 
     void handle_post_activation(const httplib::Request &request, httplib::Response &response);

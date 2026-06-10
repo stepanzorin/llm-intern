@@ -36,6 +36,9 @@ document.addEventListener(
         const cheatsheetsModal =
             document.getElementById("cheatsheets-modal");
 
+        const restartServerButton =
+            document.querySelector('[data-action="restart-server"]');
+
         if (
             form === null ||
             input === null ||
@@ -51,35 +54,57 @@ document.addEventListener(
             );
         }
 
-        const serverStatusDot =
-            document.querySelector(
-                "[data-server-status-dot], #server-status-dot"
+        const serverStatusDots =
+            document.querySelectorAll(
+                "[data-server-status-dot], #server-status-dot, #llama-server-status-dot"
             );
 
-        const serverStatusText =
-            document.querySelector(
-                "[data-server-status-text], #server-status-text"
+        const serverStatusMainTexts =
+            document.querySelectorAll(
+                "[data-server-status-text]"
             );
 
-        const companyNameElement =
-            document.querySelector(
+        const serverStatusDetailTexts =
+            document.querySelectorAll(
+                "#llama-server-status-text"
+            );
+
+        const companyNameElements =
+            document.querySelectorAll(
                 "[data-company-name], #company-name"
             );
 
-        const subscriptionElement =
-            document.querySelector(
-                "[data-subscription], #subscription-plan"
+        const subscriptionElements =
+            document.querySelectorAll(
+                "[data-subscription], #subscription-plan, #subscription-name"
             );
 
         let generationActive = false;
         let requestInFlight = false;
         let stopRequestInFlight = false;
+        let restartRequestInFlight = false;
         let previousServerGenerating = false;
         let statePollTimer = null;
+
+        function setTextForAll(nodes, text) {
+            nodes.forEach((node) => {
+                node.textContent = text;
+            });
+        }
 
         function scrollMessagesToBottom() {
             messages.scrollTop =
                 messages.scrollHeight;
+        }
+
+        function focusInputWithoutScroll() {
+            try {
+                input.focus({
+                    preventScroll: true,
+                });
+            } catch {
+                input.focus();
+            }
         }
 
         function resizeInput() {
@@ -102,19 +127,14 @@ document.addEventListener(
                     : "hidden";
         }
 
-        function appendInlineMarkdown(
-            parent,
-            text
-        ) {
+        function appendInlineMarkdown(parent, text) {
             const pattern =
                 /(`[^`\n]+`|\*\*[^*\n]+?\*\*|__[^_\n]+?__|\*[^*\n]+?\*|_[^_\n]+?_)/g;
 
             let lastIndex = 0;
             let match;
 
-            while (
-                (match = pattern.exec(text)) !== null
-                ) {
+            while ((match = pattern.exec(text)) !== null) {
                 if (match.index > lastIndex) {
                     parent.append(
                         document.createTextNode(
@@ -200,10 +220,7 @@ document.addEventListener(
             );
         }
 
-        function renderMarkdown(
-            container,
-            markdown
-        ) {
+        function renderMarkdown(container, markdown) {
             container.replaceChildren();
 
             const lines =
@@ -563,6 +580,8 @@ document.addEventListener(
             active,
             {
                 stopping = false,
+                scroll = true,
+                focus = true,
             } = {}
         ) {
             generationActive = active;
@@ -570,8 +589,22 @@ document.addEventListener(
             sendButton.hidden = active;
             stopButton.hidden = !active;
 
-            stopButton.disabled =
-                stopping || stopRequestInFlight;
+            /*
+             * Важно:
+             * Не используем stopButton.disabled для состояния "останавливаю".
+             * disabled на активной/focused кнопке может провоцировать скачок скролла.
+             *
+             * Повторные клики всё равно блокируются через stopRequestInFlight.
+             */
+            stopButton.disabled = false;
+
+            stopButton.dataset.stopping =
+                stopping ? "true" : "false";
+
+            stopButton.setAttribute(
+                "aria-disabled",
+                stopping ? "true" : "false"
+            );
 
             input.disabled = active;
 
@@ -581,25 +614,52 @@ document.addEventListener(
             form.dataset.stopping =
                 stopping ? "true" : "false";
 
+            messages.setAttribute(
+                "aria-busy",
+                active ? "true" : "false"
+            );
+
             if (active) {
-                messages.append(
-                    generatingMessage
-                );
+                /*
+                 * Добавляем индикатор только если он реально не внизу.
+                 * При нажатии "Стоп" эту функцию больше не вызываем.
+                 */
+                if (
+                    generatingMessage.parentElement !== messages ||
+                    messages.lastElementChild !== generatingMessage
+                ) {
+                    messages.append(generatingMessage);
+                }
 
                 generatingMessage.hidden = false;
 
-                scrollMessagesToBottom();
+                if (scroll) {
+                    scrollMessagesToBottom();
+                }
+
                 return;
             }
 
             generatingMessage.hidden = true;
             input.disabled = false;
-            input.focus();
+
+            stopButton.dataset.stopping = "false";
+            stopButton.setAttribute("aria-disabled", "false");
+
+            if (focus) {
+                focusInputWithoutScroll();
+            }
         }
 
         function completeGeneration(content) {
             appendAssistantMessage(content);
-            setGenerationState(false);
+
+            setGenerationState(
+                false,
+                {
+                    focus: true,
+                }
+            );
         }
 
         function failGeneration(message) {
@@ -609,7 +669,73 @@ document.addEventListener(
                 "failed"
             );
 
-            setGenerationState(false);
+            setGenerationState(
+                false,
+                {
+                    focus: true,
+                }
+            );
+        }
+
+        function setServerVisualState({
+                                          running,
+                                          generating = false,
+                                          restarting = false,
+                                          offline = false,
+                                      }) {
+            let dotStatus;
+            let dotTitle;
+            let mainText;
+            let detailText;
+
+            if (offline) {
+                dotStatus = "offline";
+                dotTitle = "Локальный сервер недоступен";
+                mainText = "Локальный сервер недоступен";
+                detailText = "Нет соединения";
+            } else if (restarting) {
+                dotStatus = "starting";
+                dotTitle = "Модель перезапускается";
+                mainText = "ИИ бот-помощник перезапускается";
+                detailText = "Модель перезапускается";
+            } else if (running && generating) {
+                dotStatus = "online";
+                dotTitle = "Модель формирует ответ";
+                mainText = "ИИ бот-помощник отвечает";
+                detailText = "Формирует ответ";
+            } else if (running) {
+                dotStatus = "online";
+                dotTitle = "Модель запущена";
+                mainText = "ИИ бот-помощник";
+                detailText = "Модель запущена";
+            } else {
+                dotStatus = "starting";
+                dotTitle = "Модель запускается";
+                mainText = "ИИ бот-помощник запускается";
+                detailText = "Модель запускается";
+            }
+
+            document.documentElement.dataset.serverRunning =
+                running ? "true" : "false";
+
+            document.documentElement.dataset.modelGenerating =
+                generating ? "true" : "false";
+
+            serverStatusDots.forEach((dot) => {
+                dot.dataset.status = dotStatus;
+                dot.dataset.state = dotStatus;
+                dot.title = dotTitle;
+            });
+
+            setTextForAll(
+                serverStatusMainTexts,
+                mainText
+            );
+
+            setTextForAll(
+                serverStatusDetailTexts,
+                detailText
+            );
         }
 
         function closeComposerMenu() {
@@ -628,7 +754,7 @@ document.addEventListener(
 
         function closeCheatsheets() {
             cheatsheetsModal.hidden = true;
-            input.focus();
+            focusInputWithoutScroll();
         }
 
         function clearInput() {
@@ -675,52 +801,45 @@ document.addEventListener(
             const modelGenerating =
                 state?.model_generates === true;
 
-            document.documentElement.dataset.serverRunning =
-                serverRunning ? "true" : "false";
+            setServerVisualState({
+                running: serverRunning,
+                generating: modelGenerating,
+            });
 
-            document.documentElement.dataset.modelGenerating =
-                modelGenerating ? "true" : "false";
+            companyNameElements.forEach((element) => {
+                if (
+                    typeof state?.company_name === "string" &&
+                    state.company_name.length !== 0
+                ) {
+                    element.textContent =
+                        state.company_name;
+                }
+            });
 
-            if (serverStatusDot !== null) {
-                serverStatusDot.dataset.status =
-                    serverRunning
-                        ? "online"
-                        : "starting";
+            subscriptionElements.forEach((element) => {
+                if (
+                    typeof state?.subscription === "string" &&
+                    state.subscription.length !== 0
+                ) {
+                    element.textContent =
+                        state.subscription;
 
-                serverStatusDot.title =
-                    serverRunning
-                        ? "Модель запущена"
-                        : "Модель не запущена";
-            }
-
-            if (serverStatusText !== null) {
-                serverStatusText.textContent =
-                    serverRunning
-                        ? "ИИ бот-помощник"
-                        : "ИИ бот-помощник запускается";
-            }
-
-            if (
-                companyNameElement !== null &&
-                typeof state?.company_name === "string"
-            ) {
-                companyNameElement.textContent =
-                    state.company_name;
-            }
-
-            if (
-                subscriptionElement !== null &&
-                typeof state?.subscription === "string"
-            ) {
-                subscriptionElement.textContent =
-                    state.subscription;
-            }
+                    element.dataset.subscriptionPlan =
+                        state.subscription;
+                }
+            });
 
             if (
                 modelGenerating &&
                 !requestInFlight
             ) {
-                setGenerationState(true);
+                setGenerationState(
+                    true,
+                    {
+                        scroll: false,
+                        focus: false,
+                    }
+                );
             }
 
             if (
@@ -728,16 +847,19 @@ document.addEventListener(
                 !modelGenerating &&
                 !requestInFlight
             ) {
-                setGenerationState(false);
-
-                loadHistory().catch(
-                    (error) => {
-                        console.error(
-                            "Failed to reload history:",
-                            error
-                        );
+                setGenerationState(
+                    false,
+                    {
+                        focus: false,
                     }
                 );
+
+                loadHistory().catch((error) => {
+                    console.error(
+                        "Failed to reload history:",
+                        error
+                    );
+                });
             }
 
             previousServerGenerating =
@@ -756,21 +878,10 @@ document.addEventListener(
                     error
                 );
 
-                document.documentElement.dataset.serverRunning =
-                    "false";
-
-                if (serverStatusDot !== null) {
-                    serverStatusDot.dataset.status =
-                        "offline";
-
-                    serverStatusDot.title =
-                        "Локальный сервер недоступен";
-                }
-
-                if (serverStatusText !== null) {
-                    serverStatusText.textContent =
-                        "Локальный сервер недоступен";
-                }
+                setServerVisualState({
+                    running: false,
+                    offline: true,
+                });
             }
         }
 
@@ -781,7 +892,8 @@ document.addEventListener(
             if (
                 message.length === 0 ||
                 generationActive ||
-                requestInFlight
+                requestInFlight ||
+                restartRequestInFlight
             ) {
                 return;
             }
@@ -794,7 +906,14 @@ document.addEventListener(
             clearInput();
 
             requestInFlight = true;
-            setGenerationState(true);
+
+            setGenerationState(
+                true,
+                {
+                    scroll: true,
+                    focus: false,
+                }
+            );
 
             try {
                 const payload =
@@ -833,7 +952,12 @@ document.addEventListener(
                 requestInFlight = false;
 
                 if (generationActive) {
-                    setGenerationState(false);
+                    setGenerationState(
+                        false,
+                        {
+                            focus: true,
+                        }
+                    );
                 }
 
                 refreshApplicationState();
@@ -850,15 +974,38 @@ document.addEventListener(
 
             stopRequestInFlight = true;
 
-            setGenerationState(
-                true,
-                {
-                    stopping: true,
-                }
-            );
+            /*
+             * Критично:
+             * Не вызываем setGenerationState() здесь.
+             * Не скрываем indicator.
+             * Не двигаем generatingMessage.
+             * Не фокусируем input.
+             * Не делаем scrollMessagesToBottom().
+             *
+             * Иначе браузер пересчитывает scroll anchoring,
+             * из-за чего появляется скачок вверх/вниз.
+             */
+            form.dataset.stopping = "true";
+
+            stopButton.dataset.stopping = "true";
+            stopButton.setAttribute("aria-disabled", "true");
+            stopButton.title = "Останавливаю генерацию...";
+
+            /*
+             * Убираем фокус с кнопки, но не переносим его в textarea.
+             * Перенос фокуса в input во время генерации тоже может дёрнуть viewport.
+             */
+            stopButton.blur();
 
             try {
                 await api.stopGeneration();
+
+                /*
+                 * Ничего не скрываем.
+                 *
+                 * Ждём, пока основной POST /api/chat/messages
+                 * вернётся из Application::ask() со статусом cancelled.
+                 */
             } catch (error) {
                 console.error(
                     "Failed to stop generation:",
@@ -872,14 +1019,96 @@ document.addEventListener(
             } finally {
                 stopRequestInFlight = false;
 
-                if (generationActive) {
-                    setGenerationState(true);
+                form.dataset.stopping = "false";
+
+                stopButton.dataset.stopping = "false";
+                stopButton.setAttribute("aria-disabled", "false");
+                stopButton.title = "Остановить генерацию ответа";
+            }
+        }
+
+        async function restartModelServer() {
+            if (
+                restartRequestInFlight ||
+                requestInFlight ||
+                generationActive
+            ) {
+                appendAssistantMessage(
+                    "Сначала дождитесь завершения текущего ответа или остановите генерацию.",
+                    "failed"
+                );
+
+                closeComposerMenu();
+
+                return;
+            }
+
+            const confirmed =
+                window.confirm(
+                    "Перезапустить локальную модель? На время перезапуска чат будет недоступен."
+                );
+
+            if (!confirmed) {
+                closeComposerMenu();
+                return;
+            }
+
+            restartRequestInFlight = true;
+            closeComposerMenu();
+
+            if (restartServerButton !== null) {
+                restartServerButton.disabled = true;
+            }
+
+            input.disabled = true;
+            sendButton.disabled = true;
+
+            setServerVisualState({
+                running: false,
+                restarting: true,
+            });
+
+            try {
+                const payload =
+                    await api.restartModelServer();
+
+                appendAssistantMessage(
+                    payload?.message ??
+                    "Модель перезапущена."
+                );
+            } catch (error) {
+                console.error(
+                    "Failed to restart model server:",
+                    error
+                );
+
+                appendAssistantMessage(
+                    error?.message ??
+                    "Не удалось перезапустить модель.",
+                    "failed"
+                );
+            } finally {
+                restartRequestInFlight = false;
+
+                if (restartServerButton !== null) {
+                    restartServerButton.disabled = false;
                 }
+
+                sendButton.disabled = false;
+                input.disabled = false;
+
+                focusInputWithoutScroll();
+
+                await refreshApplicationState();
             }
         }
 
         async function clearHistory() {
-            if (generationActive) {
+            if (
+                generationActive ||
+                requestInFlight ||
+                restartRequestInFlight
+            ) {
                 return;
             }
 
@@ -897,7 +1126,7 @@ document.addEventListener(
 
                 clearRenderedMessages();
                 closeComposerMenu();
-                input.focus();
+                focusInputWithoutScroll();
             } catch (error) {
                 console.error(
                     "Failed to clear history:",
@@ -947,6 +1176,11 @@ document.addEventListener(
             stopGeneration
         );
 
+        restartServerButton?.addEventListener(
+            "click",
+            restartModelServer
+        );
+
         document.addEventListener(
             "click",
             (event) => {
@@ -994,7 +1228,7 @@ document.addEventListener(
 
                         resizeInput();
                         closeCheatsheets();
-                        input.focus();
+                        focusInputWithoutScroll();
                     }
                 );
             });
@@ -1027,7 +1261,13 @@ document.addEventListener(
         );
 
         resizeInput();
-        setGenerationState(false);
+
+        setGenerationState(
+            false,
+            {
+                focus: false,
+            }
+        );
 
         try {
             await loadHistory();
@@ -1074,6 +1314,7 @@ document.addEventListener(
                 appendAssistantMessage,
                 completeGeneration,
                 failGeneration,
+                restartModelServer,
             });
     }
 );

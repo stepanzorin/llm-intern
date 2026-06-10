@@ -90,8 +90,10 @@
                 }
             );
         } catch (error) {
-            if (error instanceof DOMException &&
-                error.name === "AbortError") {
+            if (
+                error instanceof DOMException &&
+                error.name === "AbortError"
+            ) {
                 throw error;
             }
 
@@ -175,6 +177,15 @@
         stopGeneration() {
             return request(
                 "/api/chat/stop",
+                {
+                    method: "POST",
+                }
+            );
+        },
+
+        restartModelServer() {
+            return request(
+                "/api/server/restart",
                 {
                     method: "POST",
                 }

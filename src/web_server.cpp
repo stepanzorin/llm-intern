@@ -444,6 +444,10 @@ void WebServer::register_api_routes() {
         handle_post_stop_generation(request, response);
     });
 
+    m_http_server.Post("/api/server/restart", [this](const httplib::Request &request, httplib::Response &response) {
+        handle_post_restart_server(request, response);
+    });
+
     m_http_server.Delete("/api/chat/history", [this](const httplib::Request &request, httplib::Response &response) {
         handle_delete_chat_history(request, response);
     });
@@ -746,6 +750,34 @@ void WebServer::handle_post_stop_generation(const httplib::Request &, httplib::R
                               {"accepted", was_generating},
                       },
                       was_generating ? 202 : 200);
+}
+
+void WebServer::handle_post_restart_server(const httplib::Request &, httplib::Response &response) {
+    try {
+        const auto state = m_application.state();
+
+        if (state.model_generates) {
+            set_error_response(response,
+                               409,
+                               "generation_in_progress",
+                               "Нельзя перезапустить модель во время генерации ответа");
+
+            return;
+        }
+
+        const auto result = m_application.restart_model_server();
+
+        set_json_response(response,
+                          json{
+                                  {"success", result.success},
+                                  {"message", result.message},
+                          },
+                          result.success ? 200 : 409);
+    } catch (const std::exception &error) {
+        m_logger->error("Failed to restart llama-server: {}", error.what());
+
+        set_error_response(response, 500, "restart_failed", "Не удалось перезапустить модель");
+    }
 }
 
 void WebServer::handle_delete_chat_history(const httplib::Request &, httplib::Response &response) {

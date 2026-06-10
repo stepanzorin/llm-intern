@@ -193,6 +193,8 @@ public:
 
     void stop_generating() noexcept;
 
+    [[nodiscard]] application_operation_result_s restart_model_server();
+
     [[nodiscard]] std::vector<chat_history_entry_s> history_snapshot() const;
 
     void clear_history();

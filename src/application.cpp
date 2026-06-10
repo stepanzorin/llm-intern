@@ -198,6 +198,41 @@ void Application::stop_generating() noexcept {
     }
 }
 
+application_operation_result_s Application::restart_model_server() {
+    if (!can_use_chat()) {
+        return application_operation_result_s{.success = false, .message = "Доступ к чату недоступен"};
+    }
+
+    const auto lock = std::unique_lock{m_engine_mutex, std::try_to_lock};
+
+    if (!lock.owns_lock()) {
+        return application_operation_result_s{.success = false,
+                                              .message = "Нельзя перезапустить модель, пока формируется ответ"};
+    }
+
+    if (m_engine->model_generates()) {
+        return application_operation_result_s{.success = false,
+                                              .message = "Нельзя перезапустить модель во время генерации ответа"};
+    }
+
+    m_logger->info("Restarting llama-server by user request");
+
+    try {
+        m_engine->stop();
+        m_engine->start();
+
+        return application_operation_result_s{.success = true, .message = "Модель успешно перезапущена"};
+    } catch (const std::exception &error) {
+        m_logger->error("Failed to restart llama-server: {}", error.what());
+
+        return application_operation_result_s{.success = false, .message = "Не удалось перезапустить модель"};
+    } catch (...) {
+        m_logger->error("Failed to restart llama-server: unknown error");
+
+        return application_operation_result_s{.success = false, .message = "Не удалось перезапустить модель"};
+    }
+}
+
 std::vector<chat_history_entry_s> Application::history_snapshot() const {
     auto lock = std::scoped_lock{m_engine_mutex};
 
