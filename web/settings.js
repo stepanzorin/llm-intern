@@ -46,6 +46,23 @@ document.addEventListener("DOMContentLoaded", () => {
             "export-history"
         );
 
+    const api =
+        window.appApi;
+
+    if (api === undefined) {
+        throw new Error(
+            "app.js должен быть подключён раньше settings.js"
+        );
+    }
+
+    const clearHistoryButton =
+        document.getElementById("clear-history");
+
+    clearHistoryButton?.addEventListener(
+        "click",
+        clearChatHistory
+    );
+
     const knowledgeInput =
         document.getElementById(
             "knowledge-files"
@@ -143,6 +160,75 @@ document.addEventListener("DOMContentLoaded", () => {
 
         element.dataset.hideTimer =
             String(timeoutId);
+    }
+
+    function showSettingsMessage(
+        message,
+        {
+            isError = false,
+            durationMilliseconds = 3500,
+        } = {}
+    ) {
+        savedMessage.textContent = message;
+
+        savedMessage.classList.toggle(
+            "form-message--success",
+            !isError
+        );
+
+        savedMessage.classList.toggle(
+            "form-message--error",
+            isError
+        );
+
+        showElementTemporarily(
+            savedMessage,
+            durationMilliseconds
+        );
+    }
+
+    async function clearChatHistory() {
+        const confirmed =
+            window.confirm(
+                "Стереть всю историю чата? Это удалит локальную историю пользователя и контекст модели."
+            );
+
+        if (!confirmed) {
+            return;
+        }
+
+        const originalText =
+            clearHistoryButton.textContent;
+
+        clearHistoryButton.disabled = true;
+        clearHistoryButton.textContent =
+            "Очищаю историю...";
+
+        try {
+            await api.clearChatHistory();
+
+            showSettingsMessage(
+                "История чата очищена."
+            );
+        } catch (error) {
+            console.error(
+                "Failed to clear chat history:",
+                error
+            );
+
+            showSettingsMessage(
+                error?.message ??
+                "Не удалось очистить историю чата.",
+                {
+                    isError: true,
+                    durationMilliseconds: 6000,
+                }
+            );
+        } finally {
+            clearHistoryButton.disabled = false;
+            clearHistoryButton.textContent =
+                originalText;
+        }
     }
 
     function showValidationMessage(message) {
@@ -688,11 +774,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 window.internUi.applyStoredTheme();
             }
 
-            savedMessage.hidden = false;
-
-            window.setTimeout(() => {
-                savedMessage.hidden = true;
-            }, 2500);
+            showSettingsMessage(
+                "Настройки сохранены.",
+                {
+                    durationMilliseconds: 2500,
+                }
+            );
         }
     );
 
