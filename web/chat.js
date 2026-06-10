@@ -12,6 +12,9 @@ document.addEventListener(
             );
         }
 
+        const welcomeMessageText =
+            "Какой у Вас вопрос?";
+
         const form =
             document.getElementById("chat-form");
 
@@ -83,6 +86,7 @@ document.addEventListener(
         let requestInFlight = false;
         let stopRequestInFlight = false;
         let restartRequestInFlight = false;
+        let generationCancelledByUser = false;
         let previousServerGenerating = false;
         let statePollTimer = null;
 
@@ -453,6 +457,7 @@ document.addEventListener(
                                           role,
                                           content,
                                           status = "completed",
+                                          kind = "history",
                                       }) {
             const article =
                 document.createElement("article");
@@ -462,6 +467,9 @@ document.addEventListener(
 
             article.dataset.status =
                 status;
+
+            article.dataset.kind =
+                kind;
 
             const bubble =
                 document.createElement("div");
@@ -515,15 +523,46 @@ document.addEventListener(
             return message;
         }
 
+        function appendWelcomeMessage() {
+            const existingWelcomeMessage =
+                messages.querySelector(
+                    '[data-kind="welcome"]'
+                );
+
+            if (existingWelcomeMessage !== null) {
+                return;
+            }
+
+            appendAssistantMessage(
+                welcomeMessageText,
+                "completed",
+                {
+                    kind: "welcome",
+                }
+            );
+        }
+
+        function removeWelcomeMessage() {
+            messages
+                .querySelectorAll('[data-kind="welcome"]')
+                .forEach((messageElement) => {
+                    messageElement.remove();
+                });
+        }
+
         function appendAssistantMessage(
             content,
-            status = "completed"
+            status = "completed",
+            {
+                kind = "history",
+            } = {}
         ) {
             const message =
                 createMessageElement({
                     role: "assistant",
                     content,
                     status,
+                    kind,
                 });
 
             messages.insertBefore(
@@ -549,13 +588,24 @@ document.addEventListener(
         function renderHistory(historyMessages) {
             clearRenderedMessages();
 
-            for (const message of historyMessages) {
-                if (
-                    typeof message?.content !== "string"
-                ) {
-                    continue;
-                }
+            const realMessages =
+                historyMessages.filter((message) => {
+                    return (
+                        typeof message?.content === "string" &&
+                        (
+                            message.role === "user" ||
+                            message.role === "assistant"
+                        )
+                    );
+                });
 
+            if (realMessages.length === 0) {
+                appendWelcomeMessage();
+                scrollMessagesToBottom();
+                return;
+            }
+
+            for (const message of realMessages) {
                 if (message.role === "user") {
                     appendUserMessage(
                         message.content,
@@ -886,11 +936,11 @@ document.addEventListener(
         }
 
         async function submitMessage() {
-            const message =
+            const userMessage =
                 input.value.trim();
 
             if (
-                message.length === 0 ||
+                userMessage.length === 0 ||
                 generationActive ||
                 requestInFlight ||
                 restartRequestInFlight
@@ -898,8 +948,12 @@ document.addEventListener(
                 return;
             }
 
+            generationCancelledByUser = false;
+
+            removeWelcomeMessage();
+
             appendUserMessage(
-                message,
+                userMessage,
                 "pending"
             );
 
@@ -918,7 +972,7 @@ document.addEventListener(
             try {
                 const payload =
                     await api.sendChatMessage(
-                        message
+                        userMessage
                     );
 
                 const answer =
@@ -933,7 +987,9 @@ document.addEventListener(
                     );
                 }
 
-                completeGeneration(answer);
+                if (!generationCancelledByUser) {
+                    completeGeneration(answer);
+                }
             } catch (error) {
                 if (handleApiRedirect(error)) {
                     return;
@@ -944,20 +1000,41 @@ document.addEventListener(
                     error
                 );
 
-                failGeneration(
-                    error?.message ??
-                    "Не удалось получить ответ от бота."
-                );
+                if (!generationCancelledByUser) {
+                    failGeneration(
+                        error?.message ??
+                        "Не удалось получить ответ от бота."
+                    );
+                }
             } finally {
                 requestInFlight = false;
 
-                if (generationActive) {
+                if (
+                    generationActive &&
+                    !generationCancelledByUser
+                ) {
                     setGenerationState(
                         false,
                         {
                             focus: true,
                         }
                     );
+                }
+
+                if (generationCancelledByUser) {
+                    generationActive = false;
+                    generatingMessage.hidden = true;
+                    messages.setAttribute(
+                        "aria-busy",
+                        "false"
+                    );
+
+                    sendButton.hidden = false;
+                    stopButton.hidden = true;
+                    input.disabled = false;
+
+                    form.dataset.generating = "false";
+                    form.dataset.stopping = "false";
                 }
 
                 refreshApplicationState();
@@ -1125,6 +1202,7 @@ document.addEventListener(
                 await api.clearChatHistory();
 
                 clearRenderedMessages();
+                appendWelcomeMessage();
                 closeComposerMenu();
                 focusInputWithoutScroll();
             } catch (error) {
