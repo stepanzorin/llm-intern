@@ -56,9 +56,17 @@ void require_loaded(const bool loaded) {
     }
 }
 
+[[nodiscard]] std::string markdown_inline_code(const std::string_view text) {
+    auto escaped = std::string{text};
+
+    std::ranges::replace(escaped, '`', '\'');
+
+    return std::format("`{}`", escaped);
+}
+
 [[nodiscard]] std::string join_source_filenames(const std::span<const std::string> source_filenames) {
     if (source_filenames.empty()) {
-        return "подходящих Markdown-файлов не найдено";
+        return "подходящие `Markdown`-файлы не найдены";
     }
 
     auto result = std::string{};
@@ -68,7 +76,7 @@ void require_loaded(const bool loaded) {
             result += ", ";
         }
 
-        result += source_filenames[index];
+        result += markdown_inline_code(source_filenames[index]);
     }
 
     return result;
@@ -78,8 +86,9 @@ void require_loaded(const bool loaded) {
     auto normalized = std::string{line};
     util::trim(normalized);
 
-    return normalized == service_warning_text || normalized.starts_with("Опирался на файлы:") ||
-           normalized.starts_with("Источники:") || normalized.starts_with("Источник:");
+    return normalized.starts_with("⚠️ Бот может допускать ошибки") || normalized.starts_with("Опирался на файлы:") ||
+           normalized.starts_with("Источники:") || normalized.starts_with("Источник:") ||
+           normalized.starts_with("**Источники:**") || normalized.starts_with("**Источник:**");
 }
 
 [[nodiscard]] std::string remove_generated_service_lines(const std::string_view text) {
@@ -782,16 +791,16 @@ std::string LlamaEngine::ensure_sources_block(std::string answer, const std::spa
     auto normalized = remove_generated_service_lines(answer);
 
     if (normalized.empty()) {
-        normalized = "Не удалось получить содержательный "
-                     "ответ от модели.";
+        normalized = "Не удалось получить содержательный ответ от модели.";
     }
 
-    auto result = std::string{service_warning_text};
+    auto result = std::string{};
 
-    result += "\n\n";
     result += normalized;
 
-    result += std::format("\n\nОпирался на файлы: {}", join_source_filenames(source_filenames));
+    result += "\n\n---\n\n";
+
+    result += std::format("**Источники:** {}", join_source_filenames(source_filenames));
 
     return result;
 }

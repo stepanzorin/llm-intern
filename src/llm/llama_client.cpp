@@ -1,5 +1,6 @@
 #include "llm/llama_client.hpp"
 
+#include <array>
 #include <cassert>
 #include <exception>
 #include <format>
@@ -14,6 +15,13 @@ namespace stz::intern::llm {
 namespace {
 
 using json = nlohmann::json;
+
+constexpr auto minimum_response_tokens = 128;
+constexpr auto short_response_tokens = 256;
+constexpr auto normal_response_tokens = 384;
+constexpr auto detailed_response_tokens = 640;
+constexpr auto large_response_tokens = 896;
+
 
 class ChatCompletionStreamParser final {
 public:
@@ -169,6 +177,169 @@ void validate_client_config(const llama_client_config_s &config) {
     return std::string{to_string(state.current_model)};
 }
 
+[[nodiscard]] const chat_message_s *find_last_user_message(const std::span<const chat_message_s> messages) noexcept {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->role == chat_role_e::user) {
+            return &*it;
+        }
+    }
+
+    return nullptr;
+}
+
+[[nodiscard]] bool contains_any(const std::string_view text, const std::span<const std::string_view> phrases) noexcept {
+    return std::ranges::any_of(phrases, [text](const std::string_view phrase) { return text.contains(phrase); });
+}
+
+[[nodiscard]] bool looks_like_short_answer_request(const std::string_view text) noexcept {
+    constexpr auto phrases = std::array{std::string_view{"кратко"},
+                                        std::string_view{"коротко"},
+                                        std::string_view{"короче"},
+                                        std::string_view{"покороче"},
+                                        std::string_view{"в двух словах"},
+                                        std::string_view{"по сути"},
+                                        std::string_view{"суть"},
+                                        std::string_view{"основное"},
+                                        std::string_view{"главное"},
+                                        std::string_view{"без воды"},
+                                        std::string_view{"самое важное"},
+                                        std::string_view{"в общих чертах"},
+                                        std::string_view{"сжато"},
+                                        std::string_view{"одним предложением"},
+                                        std::string_view{"тезисно"},
+                                        std::string_view{"конспективно"},
+                                        std::string_view{"вкратце"},
+                                        std::string_view{"выжимка"},
+                                        std::string_view{"без подробностей"},
+                                        std::string_view{"без деталей"},
+                                        std::string_view{"быстро"},
+                                        std::string_view{"быстрее"},
+                                        std::string_view{"фастом"},
+                                        std::string_view{"шустро"},
+                                        std::string_view{"без духоты"},
+                                        std::string_view{"не растекаться"},
+                                        std::string_view{"без предисловий"},
+                                        std::string_view{"сухо"}};
+
+    return contains_any(text, phrases);
+}
+
+[[nodiscard]] bool looks_like_detailed_answer_request(const std::string_view text) noexcept {
+    constexpr auto phrases = std::array{std::string_view{"подробно"},
+                                        std::string_view{"подробнее"},
+                                        std::string_view{"объясни"},
+                                        std::string_view{"почему"},
+                                        std::string_view{"пример"},
+                                        std::string_view{"примеры"},
+                                        std::string_view{"развернуто"},
+                                        std::string_view{"распиши"},
+                                        std::string_view{"по шагам"},
+                                        std::string_view{"пошагово"},
+                                        std::string_view{"детально"},
+                                        std::string_view{"что делать если"},
+                                        std::string_view{"что делать, если"},
+                                        std::string_view{"инструкция"},
+                                        std::string_view{"объясни подробно"},
+                                        std::string_view{"расскажи подробнее"},
+                                        std::string_view{"простыми словами"},
+                                        std::string_view{"опиши"},
+                                        std::string_view{"как работает"},
+                                        std::string_view{"зачем"},
+                                        std::string_view{"в чём причина"},
+                                        std::string_view{"с чего начать"},
+                                        std::string_view{"алгоритм"},
+                                        std::string_view{"последовательность"},
+                                        std::string_view{"поэтапно"},
+                                        std::string_view{"шаг за шагом"},
+                                        std::string_view{"разбор"},
+                                        std::string_view{"разбери"},
+                                        std::string_view{"разжуй"},
+                                        std::string_view{"объясни на пальцах"},
+                                        std::string_view{"разъясни"},
+                                        std::string_view{"объясни популярно"},
+                                        std::string_view{"углублённо"},
+                                        std::string_view{"анализ"},
+                                        std::string_view{"полный разбор"},
+                                        std::string_view{"максимально подробно"},
+                                        std::string_view{"объясни причину"},
+                                        std::string_view{"почему так"},
+                                        std::string_view{"в чём смысл"},
+                                        std::string_view{"как устроено"},
+                                        std::string_view{"что делать сначала"},
+                                        std::string_view{"расскажи как для новичка"},
+                                        std::string_view{"напиши как для чайников"},
+                                        std::string_view{"расскажи всё что знаешь"},
+                                        std::string_view{"полностью"},
+                                        std::string_view{"в деталях"},
+                                        std::string_view{"во всех деталях"},
+                                        std::string_view{"исчерпывающе"},
+                                        std::string_view{"со всеми подробностями"},
+                                        std::string_view{"в мельчайших деталях"},
+                                        std::string_view{"дотошно"},
+                                        std::string_view{"всесторонне"},
+                                        std::string_view{"растолкуй"},
+                                        std::string_view{"шаг-за-шагом"},
+                                        std::string_view{"step by step"},
+                                        std::string_view{"step-by-step"},
+                                        std::string_view{"откуда"},
+                                        std::string_view{"расскажи как для идиота"},
+                                        std::string_view{"расскажи как для стажёра"},
+                                        std::string_view{"вывали всё"},
+                                        std::string_view{"вникни"},
+                                        std::string_view{"просвети"}};
+
+    return contains_any(text, phrases);
+}
+
+[[nodiscard]] int clamp_response_tokens(const int desired_tokens, const int configured_max_tokens) noexcept {
+    assert(configured_max_tokens > 0);
+
+    const auto safe_configured_max = std::max(configured_max_tokens, minimum_response_tokens);
+
+    return std::clamp(desired_tokens, minimum_response_tokens, safe_configured_max);
+}
+
+[[nodiscard]] int estimate_response_max_tokens(const std::span<const chat_message_s> messages,
+                                               const int configured_max_tokens) noexcept {
+    assert(configured_max_tokens > 0);
+
+    const auto *last_user_message = find_last_user_message(messages);
+
+    if (last_user_message == nullptr) {
+        return clamp_response_tokens(normal_response_tokens, configured_max_tokens);
+    }
+
+    const auto user_text = std::string_view{last_user_message->content};
+
+    if (user_text.empty()) {
+        return clamp_response_tokens(short_response_tokens, configured_max_tokens);
+    }
+
+    const auto input_bytes = user_text.size();
+
+    auto desired_tokens = normal_response_tokens;
+
+    if (input_bytes <= 80) {
+        desired_tokens = short_response_tokens;
+    } else if (input_bytes <= 300) {
+        desired_tokens = normal_response_tokens;
+    } else if (input_bytes <= 900) {
+        desired_tokens = detailed_response_tokens;
+    } else {
+        desired_tokens = large_response_tokens;
+    }
+
+    if (looks_like_short_answer_request(user_text)) {
+        desired_tokens = std::min(desired_tokens, short_response_tokens);
+    }
+
+    if (looks_like_detailed_answer_request(user_text)) {
+        desired_tokens = std::max(desired_tokens, detailed_response_tokens);
+    }
+
+    return clamp_response_tokens(desired_tokens, configured_max_tokens);
+}
+
 } // namespace
 
 LlamaClient::LlamaClient(LlamaServer &server,
@@ -210,13 +381,15 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
 
     client.set_keep_alive(false);
 
+    const auto response_max_tokens = estimate_response_max_tokens(messages, m_config.max_tokens);
+
     const auto request_json = json{
             {"model", request_model_name(state)},
             {"messages", make_chat_messages_json(messages)},
             {"stream", true},
             {"temperature", m_config.temperature},
             {"top_p", m_config.top_p},
-            {"max_tokens", m_config.max_tokens},
+            {"max_tokens", response_max_tokens},
             {"cache_prompt", m_config.cache_prompt},
             {"id_slot", session->slot_id()},
     };
@@ -261,11 +434,12 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
                 }
             };
 
-    m_logger->debug("POST {}{} model='{}' slot={}",
+    m_logger->debug("POST {}{} model='{}' slot={} max_tokens={}",
                     m_server->url(),
                     endpoint.chat_completions_path,
                     request_model_name(state),
-                    session->slot_id());
+                    session->slot_id(),
+                    response_max_tokens);
 
     const auto response = client.send(request);
 
@@ -303,6 +477,7 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
 
     return llama_client_response_s{
             .status = llama_completion_status_e::completed,
+
             .content = parser.content(),
     };
 }
