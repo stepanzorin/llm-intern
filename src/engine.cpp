@@ -17,9 +17,6 @@ namespace stz::intern {
 
 namespace {
 
-constexpr auto service_warning_text = "⚠️ Бот может допускать ошибки. "
-                                      "Рекомендуется перепроверять важную информацию.";
-
 [[nodiscard]] engine_config_s validate_engine_config(engine_config_s config) {
     if (config.history_file.empty()) {
         throw std::runtime_error{"Engine history file path is empty"};
@@ -634,40 +631,35 @@ std::size_t LlamaEngine::append_pending_user_entry(const std::string_view user_t
 }
 
 std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
-    auto prompt = std::format("Ты — AI-помощник стажёра в сфере услуг.\n"
-                              "Роль стажёра: {}.\n"
-                              "Отвечай на русском языке, просто, понятно и по делу.\n"
-                              "Если вопрос не относится к работе стажёра, "
-                              "обслуживанию клиентов или доступной базе знаний, "
-                              "не отвечай по теме вопроса, сразу отказывай. "
-                              "Скажи, что бот помогает только по рабочим "
-                              "вопросам стажёра.\n"
-                              "Используй найденные Markdown-фрагменты как "
-                              "главный источник регламента.\n"
-                              "Если точного ответа в фрагментах нет, прямо скажи: "
-                              "точный регламент не найден и составь ответ "
-                              "из своей базы знаний.\n"
-                              "Не выдумывай шаги, правила компании, скидки, "
-                              "возвраты, компенсации и гарантии.\n"
-                              "Формат: полноценный список понятных шагов "
-                              "из файла.\n",
-                              to_string(m_config.workplace_role));
+    const auto role_str = to_string(m_config.workplace_role);
 
     if (knowledge.empty()) {
-        prompt += "\nФрагменты базы знаний не найдены.\n";
-
-        return prompt;
+        return std::format(
+            "Роль: AI-помощник стажёра в сфере услуг({}).\n"
+            "Язык: Русский (просто, понятно, лаконично).\n"
+            "Правило: База знаний пуста. Сформируй ответ ИСКЛЮЧИТЕЛЬНО на основе своих общих знаний.\n"
+            "Запрещено: выдумывать регламенты компании, скидки, возвраты и компенсации.\n"
+            "Если вопрос не связан с работой стажёра — откажи: \"Бот помогает только по рабочим вопросам.\".",
+            role_str
+        );
     }
 
-    prompt += "\nФрагменты базы знаний:\n";
+    auto prompt = std::format(
+        "Роль: AI-помощник стажёра ({}).\n"
+        "Язык: Русский (просто, понятно, лаконично).\n"
+        "Правила:\n"
+        "1. Отвечай строго по теме работы и обслуживания клиентов.\n"
+        "2. Главный источник — контекст в <knowledge_base>. Формат: список шагов.\n"
+        "3. Категорически запрещено выдумывать: шаги, правила, скидки, возвраты, компенсации.\n"
+        "4. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
+        "<knowledge_base>\n",
+        role_str
+    );
 
     for (const auto &item : knowledge) {
-        prompt += std::format("\n---\n"
-                              "Файл: {}\n"
-                              "{}\n",
-                              item.filename,
-                              item.content);
+        prompt += std::format("<doc name=\"{}\">\n{}\n</doc>\n", item.filename, item.content);
     }
+    prompt += "</knowledge_base>";
 
     return prompt;
 }
