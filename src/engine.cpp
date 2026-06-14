@@ -1,7 +1,9 @@
 #include "engine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cctype>
 #include <exception>
 #include <format>
 #include <ranges>
@@ -211,6 +213,429 @@ void append_unique_source_files(std::vector<std::string> &target, const std::spa
     }
 }
 
+
+constexpr auto max_topic_anchor_ids = std::size_t{4};
+
+enum class chat_relation_kind_e {
+    standalone,
+    follow_up,
+};
+
+[[nodiscard]] std::string_view relation_kind_name(const chat_relation_kind_e relation) noexcept {
+    switch (relation) {
+        case chat_relation_kind_e::standalone: return "standalone";
+        case chat_relation_kind_e::follow_up: return "follow_up";
+    }
+
+    return "standalone";
+}
+
+void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &result) {
+    auto lowered = codepoint;
+
+    if (lowered >= U'A' && lowered <= U'Z') {
+        lowered += 32;
+    } else if (lowered >= U'А' && lowered <= U'Я') {
+        lowered += 32;
+    } else if (lowered == U'Ё') {
+        lowered = U'ё';
+    }
+
+    if (lowered <= 0x7F) {
+        result.push_back(static_cast<char>(lowered));
+        return;
+    }
+
+    if (lowered <= 0x7FF) {
+        result.push_back(static_cast<char>(0xC0 | ((lowered >> 6) & 0x1F)));
+        result.push_back(static_cast<char>(0x80 | (lowered & 0x3F)));
+        return;
+    }
+
+    if (lowered <= 0xFFFF) {
+        result.push_back(static_cast<char>(0xE0 | ((lowered >> 12) & 0x0F)));
+        result.push_back(static_cast<char>(0x80 | ((lowered >> 6) & 0x3F)));
+        result.push_back(static_cast<char>(0x80 | (lowered & 0x3F)));
+        return;
+    }
+
+    result.push_back(static_cast<char>(0xF0 | ((lowered >> 18) & 0x07)));
+    result.push_back(static_cast<char>(0x80 | ((lowered >> 12) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | ((lowered >> 6) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | (lowered & 0x3F)));
+}
+
+[[nodiscard]] std::string lowercase_utf8(const std::string_view text) {
+    auto result = std::string{};
+    result.reserve(text.size());
+
+    auto index = std::size_t{};
+
+    while (index < text.size()) {
+        const auto first = static_cast<unsigned char>(text[index]);
+
+        if (first < 0x80) {
+            result.push_back(static_cast<char>(std::tolower(first)));
+            ++index;
+            continue;
+        }
+
+        auto codepoint = char32_t{};
+        auto length = std::size_t{};
+
+        if ((first & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            codepoint = static_cast<char32_t>(((first & 0x1F) << 6) | (second & 0x3F));
+            length = 2;
+        } else if ((first & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            codepoint = static_cast<char32_t>(((first & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F));
+            length = 3;
+        } else if ((first & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            const auto second = static_cast<unsigned char>(text[index + 1]);
+            const auto third = static_cast<unsigned char>(text[index + 2]);
+            const auto fourth = static_cast<unsigned char>(text[index + 3]);
+            codepoint = static_cast<char32_t>(((first & 0x07) << 18) | ((second & 0x3F) << 12) |
+                                              ((third & 0x3F) << 6) | (fourth & 0x3F));
+            length = 4;
+        } else {
+            result.push_back(static_cast<char>(first));
+            ++index;
+            continue;
+        }
+
+        append_lowercase_utf8_codepoint(codepoint, result);
+        index += length;
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::string normalize_user_query_for_relation(const std::string_view text) {
+    auto normalized = lowercase_utf8(text);
+    util::trim(normalized);
+
+    auto result = std::string{};
+    result.reserve(normalized.size());
+
+    auto previous_space = false;
+
+    for (const auto ch : normalized) {
+        const auto byte = static_cast<unsigned char>(ch);
+
+        if (byte < 128 && std::isspace(byte) != 0) {
+            if (!previous_space) {
+                result.push_back(' ');
+                previous_space = true;
+            }
+
+            continue;
+        }
+
+        result.push_back(ch);
+        previous_space = false;
+    }
+
+    util::trim(result);
+
+    return result;
+}
+
+[[nodiscard]] bool starts_with_any(const std::string_view text,
+                                   const std::span<const std::string_view> prefixes) noexcept {
+    return std::ranges::any_of(prefixes, [text](const std::string_view prefix) { return text.starts_with(prefix); });
+}
+
+[[nodiscard]] bool contains_any(const std::string_view text,
+                                const std::span<const std::string_view> fragments) noexcept {
+    return std::ranges::any_of(fragments, [text](const std::string_view fragment) { return text.contains(fragment); });
+}
+
+[[nodiscard]] bool has_any_retrieved_knowledge(const std::span<const retrieved_knowledge_s> knowledge) noexcept {
+    return std::ranges::any_of(knowledge, [](const retrieved_knowledge_s &item) noexcept {
+        return item.match != knowledge_match_e::none;
+    });
+}
+
+[[nodiscard]] bool looks_like_explicit_follow_up(const std::string_view normalized_text) noexcept {
+    constexpr auto follow_up_prefixes = std::array{
+            std::string_view{"а "},
+            std::string_view{"и "},
+            std::string_view{"а если"},
+            std::string_view{"а что если"},
+            std::string_view{"а как"},
+            std::string_view{"а можно"},
+            std::string_view{"а надо"},
+            std::string_view{"а нужно"},
+            std::string_view{"тогда"},
+            std::string_view{"тогда "},
+            std::string_view{"в таком случае"},
+            std::string_view{"в этом случае"},
+            std::string_view{"при этом"},
+            std::string_view{"после этого"},
+            std::string_view{"дальше"},
+            std::string_view{"что дальше"},
+            std::string_view{"а дальше"},
+    };
+
+    if (starts_with_any(normalized_text, std::span{follow_up_prefixes})) {
+        return true;
+    }
+
+    constexpr auto follow_up_fragments = std::array{
+            std::string_view{"объясни подробнее"},
+            std::string_view{"распиши подробнее"},
+            std::string_view{"подробнее"},
+            std::string_view{"продолжи"},
+            std::string_view{"приведи пример"},
+            std::string_view{"пример фразы"},
+            std::string_view{"что значит"},
+            std::string_view{"это обязательно"},
+            std::string_view{"можно иначе"},
+            std::string_view{"почему так"},
+            std::string_view{"какой второй вариант"},
+            std::string_view{"второй вариант"},
+            std::string_view{"кратко"},
+            std::string_view{"коротко"},
+            std::string_view{"покороче"},
+            std::string_view{"короче"},
+            std::string_view{"сократи"},
+            std::string_view{"сокращенно"},
+            std::string_view{"сокращённо"},
+            std::string_view{"сделай кратко"},
+            std::string_view{"сделай коротко"},
+            std::string_view{"сделай короче"},
+            std::string_view{"без подробностей"},
+            std::string_view{"в двух словах"},
+            std::string_view{"одним предложением"},
+            std::string_view{"переформулируй"},
+            std::string_view{"перепиши"},
+            std::string_view{"простыми словами"},
+            std::string_view{"составь определение"},
+            std::string_view{"дай определение"},
+            std::string_view{"сформулируй определение"},
+            std::string_view{"что проверить"},
+            std::string_view{"что надо проверить"},
+            std::string_view{"что нужно проверить"},
+            std::string_view{"что обязательно проверить"},
+            std::string_view{"что важно проверить"},
+            std::string_view{"что уточнить"},
+            std::string_view{"что обязательно уточнить"},
+            std::string_view{"какие данные проверить"},
+            std::string_view{"какие поля проверить"},
+            std::string_view{"уточни порядок действий"},
+            std::string_view{"уточни порядок"},
+            std::string_view{"уточни шаги"},
+            std::string_view{"проверь порядок действий"},
+            std::string_view{"правильно ли я понимаю"},
+            std::string_view{"верно ли я понимаю"},
+            std::string_view{"я правильно понял"},
+            std::string_view{"я правильно понимаю"},
+            std::string_view{"то есть надо"},
+            std::string_view{"то есть нужно"},
+            std::string_view{"то есть правильно"},
+            std::string_view{"получается надо"},
+            std::string_view{"получается нужно"},
+            std::string_view{"проверь правильно ли"},
+            std::string_view{"это правильный порядок"},
+            std::string_view{"так правильно"},
+            std::string_view{"так можно"},
+            std::string_view{"чеклист"},
+            std::string_view{"сделай чеклист"},
+            std::string_view{"составь чеклист"},
+            std::string_view{"что сказать клиенту"},
+            std::string_view{"как сказать клиенту"},
+            std::string_view{"пример ответа клиенту"},
+            std::string_view{"пример сообщения клиенту"},
+            std::string_view{"скрипт ответа"},
+    };
+
+    constexpr auto exact_follow_up_requests = std::array{
+            std::string_view{"кратко"},
+            std::string_view{"коротко"},
+            std::string_view{"покороче"},
+            std::string_view{"короче"},
+            std::string_view{"подробнее"},
+            std::string_view{"продолжи"},
+            std::string_view{"сократи"},
+            std::string_view{"переформулируй"},
+            std::string_view{"перепиши"},
+            std::string_view{"простыми словами"},
+            std::string_view{"составь определение"},
+            std::string_view{"дай определение"},
+            std::string_view{"сформулируй определение"},
+            std::string_view{"что проверить"},
+            std::string_view{"что обязательно проверить"},
+            std::string_view{"что уточнить"},
+            std::string_view{"уточни порядок действий"},
+            std::string_view{"уточни порядок"},
+            std::string_view{"уточни шаги"},
+            std::string_view{"чеклист"},
+            std::string_view{"сделай чеклист"},
+            std::string_view{"составь чеклист"},
+    };
+
+    if (std::ranges::contains(exact_follow_up_requests, normalized_text)) {
+        return true;
+    }
+
+    return contains_any(normalized_text, std::span{follow_up_fragments});
+}
+
+[[nodiscard]] bool is_relation_term_separator(const unsigned char byte) noexcept {
+    if (byte >= 128) {
+        return false;
+    }
+
+    return std::isspace(byte) != 0 || std::ispunct(byte) != 0;
+}
+
+[[nodiscard]] std::vector<std::string> make_relation_terms(const std::string_view normalized_text) {
+    auto terms = std::vector<std::string>{};
+    auto current = std::string{};
+
+    for (const auto ch : normalized_text) {
+        const auto byte = static_cast<unsigned char>(ch);
+
+        if (is_relation_term_separator(byte)) {
+            if (!current.empty()) {
+                terms.push_back(std::move(current));
+                current.clear();
+            }
+
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (!current.empty()) {
+        terms.push_back(std::move(current));
+    }
+
+    return terms;
+}
+
+[[nodiscard]] bool contains_relation_term(const std::span<const std::string> terms,
+                                          const std::string_view expected) noexcept {
+    return std::ranges::any_of(terms, [expected](const std::string &term) noexcept {
+        return term == expected;
+    });
+}
+
+[[nodiscard]] bool contains_any_relation_term(const std::span<const std::string> terms,
+                                              const std::span<const std::string_view> expected_terms) noexcept {
+    return std::ranges::any_of(expected_terms, [terms](const std::string_view expected) noexcept {
+        return contains_relation_term(terms, expected);
+    });
+}
+
+[[nodiscard]] bool looks_like_short_reference_to_previous_answer(const std::string_view normalized_text) {
+    if (normalized_text.size() > 120) {
+        return false;
+    }
+
+    const auto terms = make_relation_terms(normalized_text);
+
+    if (terms.empty()) {
+        return false;
+    }
+
+    constexpr auto reference_terms = std::array{
+            std::string_view{"это"},
+            std::string_view{"этот"},
+            std::string_view{"эта"},
+            std::string_view{"эти"},
+            std::string_view{"так"},
+            std::string_view{"тогда"},
+            std::string_view{"там"},
+            std::string_view{"его"},
+            std::string_view{"ее"},
+            std::string_view{"её"},
+            std::string_view{"он"},
+            std::string_view{"она"},
+            std::string_view{"они"},
+            std::string_view{"пункт"},
+            std::string_view{"вариант"},
+            std::string_view{"дальше"},
+    };
+
+    if (contains_any_relation_term(terms, std::span{reference_terms})) {
+        return true;
+    }
+
+    constexpr auto reference_phrases = std::array{
+            std::string_view{"что с этим"},
+            std::string_view{"как с этим"},
+            std::string_view{"что по этому"},
+            std::string_view{"как по этому"},
+    };
+
+    return contains_any(normalized_text, std::span{reference_phrases});
+}
+
+[[nodiscard]] chat_relation_kind_e classify_relation_to_previous_answer(
+        const std::string_view user_text,
+        const bool has_previous_anchor,
+        const std::span<const retrieved_knowledge_s> knowledge) {
+    if (!has_previous_anchor) {
+        return chat_relation_kind_e::standalone;
+    }
+
+    const auto normalized_text = normalize_user_query_for_relation(user_text);
+
+    if (normalized_text.empty()) {
+        return chat_relation_kind_e::standalone;
+    }
+
+    if (looks_like_explicit_follow_up(normalized_text)) {
+        return chat_relation_kind_e::follow_up;
+    }
+
+    /*
+     * Если база знаний нашла хоть какой-то новый релевантный контекст,
+     * считаем вопрос самостоятельным. Старый ответ не надо подмешивать
+     * просто потому, что прямого Markdown-скрипта не оказалось.
+     */
+    if (has_any_retrieved_knowledge(knowledge)) {
+        return chat_relation_kind_e::standalone;
+    }
+
+    if (looks_like_short_reference_to_previous_answer(normalized_text)) {
+        return chat_relation_kind_e::follow_up;
+    }
+
+    return chat_relation_kind_e::standalone;
+}
+
+[[nodiscard]] std::vector<std::uint64_t> trim_topic_anchor_ids(std::vector<std::uint64_t> ids) {
+    if (ids.size() <= max_topic_anchor_ids) {
+        return ids;
+    }
+
+    ids.erase(ids.begin(), ids.end() - static_cast<std::ptrdiff_t>(max_topic_anchor_ids));
+
+    return ids;
+}
+
+void append_unique_anchor_id(std::vector<std::uint64_t> &ids, const std::uint64_t id) {
+    if (!ids.empty() && ids.back() == id) {
+        return;
+    }
+
+    ids.push_back(id);
+}
+
+[[nodiscard]] std::vector<std::uint64_t> make_topic_anchor_ids(std::vector<std::uint64_t> relatives,
+                                                               const std::uint64_t user_id,
+                                                               const std::uint64_t assistant_id) {
+    append_unique_anchor_id(relatives, user_id);
+    append_unique_anchor_id(relatives, assistant_id);
+
+    return trim_topic_anchor_ids(std::move(relatives));
+}
+
 } // namespace
 
 LlamaEngine::LlamaEngine(engine_config_s config,
@@ -244,7 +669,7 @@ void LlamaEngine::load() {
     finalize_interrupted_history_entries();
 
     m_knowledge.load();
-    rebuild_model_relatives();
+    rebuild_last_topic_anchor();
 
     if (m_knowledge.empty()) {
         m_logger->warn("Knowledge storage is empty");
@@ -255,7 +680,7 @@ void LlamaEngine::load() {
     m_logger->info("LlamaEngine loaded");
     m_logger->info("Workplace role: {}", to_string(m_config.workplace_role));
     m_logger->info("Chat history entries: {}", m_history.size());
-    m_logger->info("Model relatives restored: {}", m_model_relative_ids.size());
+    m_logger->info("Model relatives restored: {}", m_last_topic_anchor_ids.size());
 }
 
 void LlamaEngine::start() {
@@ -369,9 +794,9 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                 .relatives = assistant_relatives,
         });
 
-        m_model_relative_ids = std::move(assistant_relatives);
+        m_last_topic_anchor_ids = std::move(assistant_relatives);
 
-        m_model_relative_ids.push_back(assistant_id);
+        m_last_topic_anchor_ids.push_back(assistant_id);
 
         save_history();
 
@@ -403,9 +828,23 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                  "llama-server is not ready"};
     }
 
+    const auto relation = classify_relation_to_previous_answer(
+            user_text,
+            !m_last_topic_anchor_ids.empty(),
+            knowledge);
+
     m_history[user_index].answer_kind = chat_answer_kind_e::llm;
 
-    m_history[user_index].relatives = m_model_relative_ids;
+    if (relation == chat_relation_kind_e::follow_up) {
+        m_history[user_index].relatives = m_last_topic_anchor_ids;
+    } else {
+        m_history[user_index].relatives.clear();
+    }
+
+    m_logger->info("LLM request relation: {} previous_anchor_ids={} relatives_used={}",
+                   relation_kind_name(relation),
+                   m_last_topic_anchor_ids.size(),
+                   m_history[user_index].relatives.size());
 
     save_history();
 
@@ -480,9 +919,10 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
             .relatives = assistant_relatives,
     });
 
-    m_model_relative_ids = std::move(assistant_relatives);
-
-    m_model_relative_ids.push_back(assistant_id);
+    m_last_topic_anchor_ids = make_topic_anchor_ids(
+            std::move(assistant_relatives),
+            user_id,
+            assistant_id);
 
     save_history();
 
@@ -537,7 +977,7 @@ void LlamaEngine::clear_history() {
     }
 
     m_history.clear();
-    m_model_relative_ids.clear();
+    m_last_topic_anchor_ids.clear();
 
     save_history();
 
@@ -574,17 +1014,19 @@ void LlamaEngine::finalize_interrupted_history_entries() {
                            interrupted_count);
 }
 
-void LlamaEngine::rebuild_model_relatives() {
-    m_model_relative_ids.clear();
+void LlamaEngine::rebuild_last_topic_anchor() {
+    m_last_topic_anchor_ids.clear();
 
     for (auto it = m_history.rbegin(); it != m_history.rend(); ++it) {
         if (!is_completed_assistant_entry(*it)) {
             continue;
         }
 
-        m_model_relative_ids = it->relatives;
+        auto anchor_ids = it->relatives;
+        anchor_ids.push_back(it->id);
 
-        m_model_relative_ids.push_back(it->id);
+        m_last_topic_anchor_ids = trim_topic_anchor_ids(
+                std::move(anchor_ids));
 
         return;
     }
@@ -679,6 +1121,28 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
 
             .source_files = {},
     });
+
+    if (!current_user_entry.relatives.empty()) {
+        messages.push_back(chat_message_s{
+                .role = chat_role_e::system,
+                .name = "follow_up_mode",
+
+                .content =
+                        "Текущий пользовательский запрос является уточнением к предыдущему ответу. "
+                        "Обязательно используй предыдущие сообщения ниже как основной контекст. "
+                        "Если пользователь просит «кратко», «коротко», «сократи», «подробнее», "
+                        "«переформулируй», «составь определение», «что проверить», "
+                        "«уточни порядок действий», «правильно ли я понимаю» или задаёт похожую короткую команду, "
+                        "это не новая тема и не вопрос вне роли. "
+                        "В таком случае измени или уточни именно предыдущий ответ: сократи, дополни, "
+                        "сформулируй определение, составь чеклист, проверь понимание пользователя или уточни порядок действий. "
+                        "Не пиши блок источников: приложение добавит его автоматически.",
+
+                .created_at = util::make_local_timestamp(),
+
+                .source_files = {},
+        });
+    }
 
     for (const auto relative_id : current_user_entry.relatives) {
         const auto *entry = find_history_entry(relative_id);

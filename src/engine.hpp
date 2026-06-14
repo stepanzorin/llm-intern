@@ -88,7 +88,7 @@ private:
 
     void finalize_interrupted_history_entries();
 
-    void rebuild_model_relatives();
+    void rebuild_last_topic_anchor();
 
     [[nodiscard]] const chat_history_entry_s *find_history_entry(std::uint64_t id) const noexcept;
 
@@ -126,7 +126,7 @@ private:
     llm::LlamaClient m_client;
 
     std::vector<chat_history_entry_s> m_history;
-    std::vector<std::uint64_t> m_model_relative_ids;
+    std::vector<std::uint64_t> m_last_topic_anchor_ids;
 
     KnowledgeStorage m_knowledge;
 
