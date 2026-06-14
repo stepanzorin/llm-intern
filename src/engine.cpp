@@ -575,6 +575,59 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
     return contains_any(normalized_text, std::span{reference_phrases});
 }
 
+[[nodiscard]] bool looks_like_contextual_order_or_confirmation_question(
+        const std::string_view normalized_text) noexcept {
+    if (normalized_text.size() > 260) {
+        return false;
+    }
+
+    constexpr auto order_or_confirmation_fragments = std::array{
+            std::string_view{"перед "},
+            std::string_view{"до "},
+            std::string_view{"после"},
+            std::string_view{"сначала"},
+            std::string_view{"потом"},
+            std::string_view{"затем"},
+            std::string_view{"или после"},
+            std::string_view{"или до"},
+            std::string_view{"или неважно"},
+            std::string_view{"неважно"},
+            std::string_view{"обязательно"},
+            std::string_view{"должна"},
+            std::string_view{"должен"},
+            std::string_view{"должны"},
+            std::string_view{"надо ли"},
+            std::string_view{"нужно ли"},
+            std::string_view{"можно ли"},
+            std::string_view{"нужно сначала"},
+            std::string_view{"надо сначала"},
+    };
+
+    if (!contains_any(normalized_text, std::span{order_or_confirmation_fragments})) {
+        return false;
+    }
+
+    constexpr auto service_action_fragments = std::array{
+            std::string_view{"звон"},
+            std::string_view{"позвон"},
+            std::string_view{"напис"},
+            std::string_view{"сообщ"},
+            std::string_view{"сказ"},
+            std::string_view{"предупред"},
+            std::string_view{"уведом"},
+            std::string_view{"уточн"},
+            std::string_view{"подтверд"},
+            std::string_view{"провери"},
+            std::string_view{"перенос"},
+            std::string_view{"отмен"},
+            std::string_view{"запис"},
+            std::string_view{"визит"},
+            std::string_view{"клиент"},
+    };
+
+    return contains_any(normalized_text, std::span{service_action_fragments});
+}
+
 [[nodiscard]] chat_relation_kind_e classify_relation_to_previous_answer(
         const std::string_view user_text,
         const bool has_previous_anchor,
@@ -593,17 +646,22 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
         return chat_relation_kind_e::follow_up;
     }
 
-    /*
-     * Если база знаний нашла хоть какой-то новый релевантный контекст,
-     * считаем вопрос самостоятельным. Старый ответ не надо подмешивать
-     * просто потому, что прямого Markdown-скрипта не оказалось.
-     */
-    if (has_any_retrieved_knowledge(knowledge)) {
-        return chat_relation_kind_e::standalone;
+    if (looks_like_contextual_order_or_confirmation_question(normalized_text)) {
+        return chat_relation_kind_e::follow_up;
     }
 
     if (looks_like_short_reference_to_previous_answer(normalized_text)) {
         return chat_relation_kind_e::follow_up;
+    }
+
+    /*
+     * Новый релевантный Markdown-контекст обычно означает самостоятельную
+     * тему. Но проверка стоит после явных признаков follow-up: иначе вопросы
+     * вида «перед переносом или после?» ошибочно отрываются от предыдущего
+     * direct-knowledge ответа только потому, что retrieval нашёл похожий файл.
+     */
+    if (has_any_retrieved_knowledge(knowledge)) {
+        return chat_relation_kind_e::standalone;
     }
 
     return chat_relation_kind_e::standalone;
@@ -1080,7 +1138,9 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
             "Роль: AI-помощник стажёра в сфере услуг({}).\n"
             "Язык: Русский (просто, понятно, лаконично).\n"
             "Правило: База знаний пуста. Сформируй ответ ИСКЛЮЧИТЕЛЬНО на основе своих общих знаний.\n"
+            "Формат ответа: готовая инструкция для стажёра, а не подсказка для поиска.\n"
             "Запрещено: выдумывать регламенты компании, скидки, возвраты и компенсации.\n"
+            "Запрещено: предлагать поисковые запросы, ключевые слова, имена файлов или способы искать информацию в базе знаний.\n"
             "Если вопрос не связан с работой стажёра — откажи: \"Бот помогает только по рабочим вопросам.\".",
             role_str
         );
@@ -1091,9 +1151,11 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
         "Язык: Русский (просто, понятно, лаконично).\n"
         "Правила:\n"
         "1. Отвечай строго по теме работы и обслуживания клиентов.\n"
-        "2. Главный источник — контекст в <knowledge_base>. Формат: список шагов.\n"
+        "2. Главный источник — контекст в <knowledge_base>. Формат ответа: готовая инструкция для стажёра.\n"
         "3. Категорически запрещено выдумывать: шаги, правила, скидки, возвраты, компенсации.\n"
-        "4. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
+        "4. Не предлагай пользователю поисковые запросы, ключевые слова, имена файлов или способы искать информацию в базе знаний.\n"
+        "5. Если прямого регламента нет, честно скажи это и дай осторожную общую рекомендацию отдельно.\n"
+        "6. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
         "<knowledge_base>\n",
         role_str
     );
@@ -1136,6 +1198,8 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
                         "это не новая тема и не вопрос вне роли. "
                         "В таком случае измени или уточни именно предыдущий ответ: сократи, дополни, "
                         "сформулируй определение, составь чеклист, проверь понимание пользователя или уточни порядок действий. "
+                        "Если пользователь спрашивает о порядке действий, например «до или после», отвечай как продолжение предыдущего сценария. "
+                        "Не предлагай поисковые запросы, ключевые слова или имена файлов. "
                         "Не пиши блок источников: приложение добавит его автоматически.",
 
                 .created_at = util::make_local_timestamp(),
@@ -1201,13 +1265,12 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
 std::vector<std::string> LlamaEngine::make_context_source_filenames(
         const std::span<const retrieved_knowledge_s> knowledge,
         const std::span<const std::uint64_t> relatives) const {
-    auto result = make_source_filenames(knowledge);
+    auto result = make_source_filenames_from_relatives(relatives);
+    auto retrieved_source_filenames = make_source_filenames(knowledge);
 
-    if (!result.empty()) {
-        return result;
-    }
+    append_unique_source_files(result, retrieved_source_filenames);
 
-    return make_source_filenames_from_relatives(relatives);
+    return result;
 }
 
 std::vector<std::string> LlamaEngine::make_source_filenames_from_relatives(
