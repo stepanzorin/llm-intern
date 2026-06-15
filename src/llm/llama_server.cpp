@@ -466,6 +466,7 @@ struct native_process_s {
 #ifdef STZ_INTERN_PLATFORM_WINDOWS
     HANDLE process = nullptr;
     HANDLE thread = nullptr;
+    HANDLE job = nullptr;
     HANDLE output_read = nullptr;
 #else
     pid_t pid = -1;
@@ -503,6 +504,31 @@ void start_native_process(detail::native_process_s &process,
         throw std::runtime_error{std::format("SetHandleInformation failed: error={}", GetLastError())};
     }
 
+    auto job = CreateJobObjectW(nullptr, nullptr);
+
+    if (job == nullptr) {
+        CloseHandle(output_read);
+        CloseHandle(output_write);
+
+        throw std::runtime_error{std::format("CreateJobObjectW failed: error={}", GetLastError())};
+    }
+
+    auto job_limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION{};
+    job_limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    if (SetInformationJobObject(job,
+                                JobObjectExtendedLimitInformation,
+                                &job_limits,
+                                static_cast<DWORD>(sizeof(job_limits))) == FALSE) {
+        const auto error = GetLastError();
+
+        CloseHandle(job);
+        CloseHandle(output_read);
+        CloseHandle(output_write);
+
+        throw std::runtime_error{std::format("SetInformationJobObject failed: error={}", error)};
+    }
+
     auto startup_info = STARTUPINFOW{};
     startup_info.cb = sizeof(startup_info);
     startup_info.dwFlags = STARTF_USESTDHANDLES;
@@ -525,7 +551,7 @@ void start_native_process(detail::native_process_s &process,
                                         nullptr,
                                         nullptr,
                                         TRUE,
-                                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED,
                                         nullptr,
                                         working_directory.wstring().c_str(),
                                         &startup_info,
@@ -534,14 +560,46 @@ void start_native_process(detail::native_process_s &process,
     CloseHandle(output_write);
 
     if (created == FALSE) {
+        const auto error = GetLastError();
+
+        CloseHandle(job);
         CloseHandle(output_read);
 
         throw std::runtime_error{
-                std::format("CreateProcessW failed for '{}': error={}", path_to_utf8(executable), GetLastError())};
+                std::format("CreateProcessW failed for '{}': error={}", path_to_utf8(executable), error)};
+    }
+
+    if (AssignProcessToJobObject(job, process_info.hProcess) == FALSE) {
+        const auto error = GetLastError();
+
+        TerminateProcess(process_info.hProcess, 1);
+        WaitForSingleObject(process_info.hProcess, 5000);
+
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        CloseHandle(job);
+        CloseHandle(output_read);
+
+        throw std::runtime_error{std::format("AssignProcessToJobObject failed: error={}", error)};
+    }
+
+    if (ResumeThread(process_info.hThread) == static_cast<DWORD>(-1)) {
+        const auto error = GetLastError();
+
+        TerminateProcess(process_info.hProcess, 1);
+        WaitForSingleObject(process_info.hProcess, 5000);
+
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        CloseHandle(job);
+        CloseHandle(output_read);
+
+        throw std::runtime_error{std::format("ResumeThread failed: error={}", error)};
     }
 
     process.process = process_info.hProcess;
     process.thread = process_info.hThread;
+    process.job = job;
     process.output_read = output_read;
 }
 
@@ -574,9 +632,21 @@ void terminate_native_process(detail::native_process_s &process, const std::chro
             std::min<std::int64_t>(timeout.count(), std::numeric_limits<DWORD>::max()));
 
     WaitForSingleObject(process.process, wait_milliseconds);
+
+    if (process.job != nullptr) {
+        CloseHandle(process.job);
+        process.job = nullptr;
+    }
+
+    WaitForSingleObject(process.process, wait_milliseconds);
 }
 
 void close_native_process(detail::native_process_s &process) noexcept {
+    if (process.job != nullptr) {
+        CloseHandle(process.job);
+        process.job = nullptr;
+    }
+
     if (process.output_read != nullptr) {
         CloseHandle(process.output_read);
         process.output_read = nullptr;
