@@ -213,6 +213,36 @@ void append_unique_source_files(std::vector<std::string> &target, const std::spa
     }
 }
 
+void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
+                             const std::span<const retrieved_knowledge_s> source) {
+    auto seen = std::unordered_set<std::string>{};
+    seen.reserve(target.size() + source.size());
+
+    for (const auto &item : target) {
+        seen.insert(item.filename);
+    }
+
+    for (const auto &item : source) {
+        if (seen.insert(item.filename).second) {
+            target.push_back(item);
+        }
+    }
+}
+
+[[nodiscard]] knowledge_retrieve_options_s make_knowledge_retrieve_options(const engine_config_s &config) noexcept {
+    return knowledge_retrieve_options_s{
+            .workplace_role = config.workplace_role,
+
+            .include_general = true,
+            .include_custom = true,
+
+            .limit = config.max_knowledge_documents,
+
+            .max_chars_per_document = config.max_knowledge_chars_per_document,
+
+            .min_ranked_score = config.min_ranked_knowledge_score,
+    };
+}
 
 constexpr auto max_topic_anchor_ids = std::size_t{4};
 
@@ -356,6 +386,125 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
     return std::ranges::any_of(knowledge, [](const retrieved_knowledge_s &item) noexcept {
         return item.match != knowledge_match_e::none;
     });
+}
+
+[[nodiscard]] const chat_history_entry_s *find_history_entry(
+        const std::span<const chat_history_entry_s> history,
+        const std::uint64_t id) noexcept {
+    const auto it = std::ranges::find_if(history, [id](const chat_history_entry_s &entry) noexcept {
+        return entry.id == id;
+    });
+
+    if (it == history.end()) {
+        return nullptr;
+    }
+
+    return &*it;
+}
+
+[[nodiscard]] std::string make_anchor_relation_text(
+        const std::span<const chat_history_entry_s> history,
+        const std::span<const std::uint64_t> anchor_ids) {
+    auto result = std::string{};
+
+    for (const auto id : anchor_ids) {
+        const auto *entry = find_history_entry(history, id);
+
+        if (entry == nullptr) {
+            continue;
+        }
+
+        if (entry->user.has_value() && !util::is_blank(entry->user->model_content)) {
+            result += ' ';
+            result += entry->user->model_content;
+        }
+
+        if (entry->assistant.has_value() && !util::is_blank(entry->assistant->model_content)) {
+            result += ' ';
+            result += entry->assistant->model_content;
+        }
+
+        for (const auto &filename : entry->source_files) {
+            result += ' ';
+            result += filename;
+        }
+    }
+
+    return normalize_user_query_for_relation(result);
+}
+
+[[nodiscard]] bool contains_topic_group(
+        const std::string_view text,
+        const std::span<const std::string_view> fragments) noexcept {
+    return contains_any(text, fragments);
+}
+
+[[nodiscard]] bool contains_same_specific_topic_group(
+        const std::string_view current_text,
+        const std::string_view anchor_text) noexcept {
+    constexpr auto reschedule_fragments = std::array{
+            std::string_view{"перенос"},
+            std::string_view{"перенести"},
+            std::string_view{"перезапис"},
+            std::string_view{"reschedule"},
+    };
+
+    constexpr auto cancel_fragments = std::array{
+            std::string_view{"отмен"},
+            std::string_view{"cancel"},
+    };
+
+    constexpr auto payment_fragments = std::array{
+            std::string_view{"оплат"},
+            std::string_view{"платеж"},
+            std::string_view{"платёж"},
+            std::string_view{"payment"},
+    };
+
+    constexpr auto refund_fragments = std::array{
+            std::string_view{"возврат"},
+            std::string_view{"вернуть деньги"},
+            std::string_view{"refund"},
+    };
+
+    constexpr auto record_fragments = std::array{
+            std::string_view{"запис"},
+            std::string_view{"record"},
+    };
+
+    constexpr auto visit_fragments = std::array{
+            std::string_view{"визит"},
+            std::string_view{"посещ"},
+            std::string_view{"visit"},
+    };
+
+    const auto matches_group = [&](const std::span<const std::string_view> group) noexcept {
+        return contains_topic_group(current_text, group) && contains_topic_group(anchor_text, group);
+    };
+
+    return matches_group(std::span<const std::string_view>{reschedule_fragments}) ||
+           matches_group(std::span<const std::string_view>{cancel_fragments}) ||
+           matches_group(std::span<const std::string_view>{payment_fragments}) ||
+           matches_group(std::span<const std::string_view>{refund_fragments}) ||
+           matches_group(std::span<const std::string_view>{record_fragments}) ||
+           matches_group(std::span<const std::string_view>{visit_fragments});
+}
+
+[[nodiscard]] bool looks_related_to_previous_anchor(
+        const std::string_view normalized_text,
+        const std::span<const chat_history_entry_s> history,
+        const std::span<const std::uint64_t> anchor_ids) {
+    if (anchor_ids.empty()) {
+        return false;
+    }
+
+    const auto anchor_text = make_anchor_relation_text(history, anchor_ids);
+
+    if (anchor_text.empty()) {
+        return false;
+    }
+
+    return contains_same_specific_topic_group(normalized_text, anchor_text);
 }
 
 [[nodiscard]] bool looks_like_explicit_follow_up(const std::string_view normalized_text) noexcept {
@@ -630,9 +779,10 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
 
 [[nodiscard]] chat_relation_kind_e classify_relation_to_previous_answer(
         const std::string_view user_text,
-        const bool has_previous_anchor,
+        const std::span<const chat_history_entry_s> history,
+        const std::span<const std::uint64_t> previous_anchor_ids,
         const std::span<const retrieved_knowledge_s> knowledge) {
-    if (!has_previous_anchor) {
+    if (previous_anchor_ids.empty()) {
         return chat_relation_kind_e::standalone;
     }
 
@@ -655,10 +805,21 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
     }
 
     /*
-     * Новый релевантный Markdown-контекст обычно означает самостоятельную
-     * тему. Но проверка стоит после явных признаков follow-up: иначе вопросы
-     * вида «перед переносом или после?» ошибочно отрываются от предыдущего
-     * direct-knowledge ответа только потому, что retrieval нашёл похожий файл.
+     * Вопрос может найти новый ranked-контекст и при этом всё равно
+     * быть уточнением к предыдущей теме. Например: после ответа
+     * про перенос записи пользователь спрашивает: «звонить до переноса
+     * или после?». Retrieval может поднять файл про уведомления,
+     * но тема всё ещё прежняя — перенос записи.
+     */
+    if (looks_related_to_previous_anchor(normalized_text, history, previous_anchor_ids)) {
+        return chat_relation_kind_e::follow_up;
+    }
+
+    /*
+     * Если база знаний нашла релевантный контекст, и связи с предыдущей
+     * темой не видно, считаем вопрос самостоятельным. Старый ответ
+     * нельзя подмешивать просто потому, что прямого Markdown-скрипта
+     * не оказалось.
      */
     if (has_any_retrieved_knowledge(knowledge)) {
         return chat_relation_kind_e::standalone;
@@ -774,20 +935,9 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
     save_history();
 
-    const auto knowledge = m_knowledge.retrieve(
-            user_text,
-            knowledge_retrieve_options_s{
-                    .workplace_role = m_config.workplace_role,
+    const auto knowledge_options = make_knowledge_retrieve_options(m_config);
 
-                    .include_general = true,
-                    .include_custom = true,
-
-                    .limit = m_config.max_knowledge_documents,
-
-                    .max_chars_per_document = m_config.max_knowledge_chars_per_document,
-
-                    .min_ranked_score = m_config.min_ranked_knowledge_score,
-            });
+    const auto knowledge = m_knowledge.retrieve(user_text, knowledge_options);
 
     for (const auto &item : knowledge) {
         m_logger->info("Retrieved knowledge: {} "
@@ -852,9 +1002,10 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                 .relatives = assistant_relatives,
         });
 
-        m_last_topic_anchor_ids = std::move(assistant_relatives);
-
-        m_last_topic_anchor_ids.push_back(assistant_id);
+        m_last_topic_anchor_ids = make_topic_anchor_ids(
+                std::move(assistant_relatives),
+                user_id,
+                assistant_id);
 
         save_history();
 
@@ -888,7 +1039,8 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
     const auto relation = classify_relation_to_previous_answer(
             user_text,
-            !m_last_topic_anchor_ids.empty(),
+            std::span{m_history},
+            std::span{m_last_topic_anchor_ids},
             knowledge);
 
     m_history[user_index].answer_kind = chat_answer_kind_e::llm;
@@ -899,17 +1051,28 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
         m_history[user_index].relatives.clear();
     }
 
-    m_logger->info("LLM request relation: {} previous_anchor_ids={} relatives_used={}",
+    auto prompt_knowledge = knowledge;
+
+    if (relation == chat_relation_kind_e::follow_up) {
+        auto anchor_source_filenames = make_source_filenames_from_relatives(m_history[user_index].relatives);
+        auto anchor_knowledge = m_knowledge.retrieve_by_filenames(anchor_source_filenames, knowledge_options);
+
+        prompt_knowledge = std::move(anchor_knowledge);
+        append_unique_knowledge(prompt_knowledge, knowledge);
+    }
+
+    m_logger->info("LLM request relation: {} previous_anchor_ids={} relatives_used={} knowledge_docs={}",
                    relation_kind_name(relation),
                    m_last_topic_anchor_ids.size(),
-                   m_history[user_index].relatives.size());
+                   m_history[user_index].relatives.size(),
+                   prompt_knowledge.size());
 
     save_history();
 
     auto response = llm::llama_client_response_s{};
 
     try {
-        const auto request_messages = build_request_messages(m_history[user_index], knowledge);
+        const auto request_messages = build_request_messages(m_history[user_index], prompt_knowledge);
 
         response = m_client.complete_chat(request_messages, stream_callback);
     } catch (...) {
@@ -934,7 +1097,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
         };
     }
 
-    auto source_filenames = make_context_source_filenames(knowledge, m_history[user_index].relatives);
+    auto source_filenames = make_context_source_filenames(prompt_knowledge, m_history[user_index].relatives);
 
     auto answer_body = remove_generated_service_lines(response.content);
 

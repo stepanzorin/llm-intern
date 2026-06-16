@@ -1073,6 +1073,46 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
     return ranked_results;
 }
 
+std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
+        const std::span<const std::string> filenames,
+        const knowledge_retrieve_options_s &options) const {
+    if (m_documents.empty() || filenames.empty() || options.limit == 0) {
+        return {};
+    }
+
+    auto result = std::vector<retrieved_knowledge_s>{};
+    auto seen = std::unordered_set<std::string>{};
+
+    result.reserve(std::min(options.limit, filenames.size()));
+    seen.reserve(filenames.size());
+
+    for (const auto &filename : filenames) {
+        if (result.size() >= options.limit) {
+            break;
+        }
+
+        if (!seen.insert(filename).second) {
+            continue;
+        }
+
+        const auto it = std::ranges::find_if(m_documents, [&](const knowledge_document_s &document) noexcept {
+            return document.filename == filename && document_matches_options(document, options);
+        });
+
+        if (it == m_documents.end()) {
+            m_logger->debug("Knowledge file referenced by chat history was not found: {}", filename);
+            continue;
+        }
+
+        result.push_back(make_retrieved_document(*it,
+                                                 exact_frequent_query_score,
+                                                 options.max_chars_per_document,
+                                                 knowledge_match_e::ranked));
+    }
+
+    return result;
+}
+
 bool KnowledgeStorage::empty() const noexcept { return m_documents.empty(); }
 
 std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size(); }

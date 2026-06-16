@@ -85,6 +85,10 @@ public:
     [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve(std::string_view query,
                                                               const knowledge_retrieve_options_s &options) const;
 
+    [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve_by_filenames(
+            std::span<const std::string> filenames,
+            const knowledge_retrieve_options_s &options) const;
+
     [[nodiscard]] bool empty() const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept;
