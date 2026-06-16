@@ -209,6 +209,10 @@ document.addEventListener(
             }
         }
 
+        function getMarkdownIndent(indent) {
+            return indent.replace(/\t/g, "    ").length;
+        }
+
         function isBlockStart(line) {
             const trimmed =
                 line.trim();
@@ -216,8 +220,8 @@ document.addEventListener(
             return (
                 trimmed.length === 0 ||
                 /^#{1,6}\s+/.test(trimmed) ||
-                /^[-*+]\s+/.test(trimmed) ||
-                /^\d+[.)]\s+/.test(trimmed) ||
+                /^\s*[-*+]\s+/.test(line) ||
+                /^\s*\d+[.)]\s+/.test(line) ||
                 /^>\s?/.test(trimmed) ||
                 /^```/.test(trimmed) ||
                 /^-{3,}$/.test(trimmed)
@@ -233,33 +237,111 @@ document.addEventListener(
                     .split("\n");
 
             let index = 0;
-            let activeList = null;
-            let activeListTag = null;
 
-            function closeList() {
-                activeList = null;
-                activeListTag = null;
+            const listStack = [];
+
+            function closeLists() {
+                listStack.length = 0;
             }
 
-            function getList(tagName) {
+            function currentListState() {
+                return listStack.length === 0
+                    ? null
+                    : listStack[listStack.length - 1];
+            }
+
+            function appendListToParent(list, indent) {
+                const parentState =
+                    currentListState();
+
                 if (
-                    activeList !== null &&
-                    activeListTag === tagName
+                    parentState !== null &&
+                    indent > parentState.indent &&
+                    parentState.lastItem !== null
                 ) {
-                    return activeList;
+                    parentState.lastItem.append(list);
+                    return;
                 }
 
-                closeList();
+                container.append(list);
+            }
 
-                activeList =
+            function ensureList({
+                                    indent,
+                                    tagName,
+                                    startNumber = 1,
+                                }) {
+                while (
+                    currentListState() !== null &&
+                    indent < currentListState().indent
+                ) {
+                    listStack.pop();
+                }
+
+                if (
+                    currentListState() !== null &&
+                    indent === currentListState().indent &&
+                    tagName !== currentListState().tagName
+                ) {
+                    listStack.pop();
+                }
+
+                if (
+                    currentListState() !== null &&
+                    indent === currentListState().indent &&
+                    tagName === currentListState().tagName
+                ) {
+                    return currentListState();
+                }
+
+                const list =
                     document.createElement(tagName);
 
-                activeListTag =
-                    tagName;
+                if (
+                    tagName === "ol" &&
+                    Number.isInteger(startNumber) &&
+                    startNumber > 1
+                ) {
+                    list.start = startNumber;
+                }
 
-                container.append(activeList);
+                appendListToParent(list, indent);
 
-                return activeList;
+                const state = {
+                    indent,
+                    tagName,
+                    list,
+                    lastItem: null,
+                };
+
+                listStack.push(state);
+
+                return state;
+            }
+
+            function appendListItem({
+                                        indent,
+                                        tagName,
+                                        text,
+                                        startNumber = 1,
+                                    }) {
+                const state =
+                    ensureList({
+                        indent,
+                        tagName,
+                        startNumber,
+                    });
+
+                const item =
+                    document.createElement("li");
+
+                appendInlineMarkdown(
+                    item,
+                    text
+                );
+
+                state.list.append(item);
+                state.lastItem = item;
             }
 
             while (index < lines.length) {
@@ -270,13 +352,12 @@ document.addEventListener(
                     line.trim();
 
                 if (trimmed.length === 0) {
-                    closeList();
                     ++index;
                     continue;
                 }
 
                 if (trimmed.startsWith("```")) {
-                    closeList();
+                    closeLists();
 
                     const language =
                         trimmed.slice(3).trim();
@@ -290,7 +371,7 @@ document.addEventListener(
                         !lines[index]
                             .trim()
                             .startsWith("```")
-                        ) {
+                    ) {
                         codeLines.push(
                             lines[index]
                         );
@@ -326,7 +407,7 @@ document.addEventListener(
                     /^(#{1,6})\s+(.+)$/.exec(trimmed);
 
                 if (headingMatch !== null) {
-                    closeList();
+                    closeLists();
 
                     const level =
                         headingMatch[1].length;
@@ -348,42 +429,35 @@ document.addEventListener(
                 }
 
                 const unorderedMatch =
-                    /^[-*+]\s+(.+)$/.exec(trimmed);
+                    /^(\s*)[-*+]\s+(.+)$/.exec(line);
 
                 if (unorderedMatch !== null) {
-                    const list =
-                        getList("ul");
-
-                    const item =
-                        document.createElement("li");
-
-                    appendInlineMarkdown(
-                        item,
-                        unorderedMatch[1]
-                    );
-
-                    list.append(item);
+                    appendListItem({
+                        indent: getMarkdownIndent(
+                            unorderedMatch[1]
+                        ),
+                        tagName: "ul",
+                        text: unorderedMatch[2],
+                    });
 
                     ++index;
                     continue;
                 }
 
                 const orderedMatch =
-                    /^\d+[.)]\s+(.+)$/.exec(trimmed);
+                    /^(\s*)(\d+)[.)]\s+(.+)$/.exec(line);
 
                 if (orderedMatch !== null) {
-                    const list =
-                        getList("ol");
-
-                    const item =
-                        document.createElement("li");
-
-                    appendInlineMarkdown(
-                        item,
-                        orderedMatch[1]
-                    );
-
-                    list.append(item);
+                    appendListItem({
+                        indent: getMarkdownIndent(
+                            orderedMatch[1]
+                        ),
+                        tagName: "ol",
+                        text: orderedMatch[3],
+                        startNumber: Number(
+                            orderedMatch[2]
+                        ),
+                    });
 
                     ++index;
                     continue;
@@ -393,7 +467,7 @@ document.addEventListener(
                     /^>\s?(.*)$/.exec(trimmed);
 
                 if (quoteMatch !== null) {
-                    closeList();
+                    closeLists();
 
                     const quote =
                         document.createElement(
@@ -412,7 +486,7 @@ document.addEventListener(
                 }
 
                 if (/^-{3,}$/.test(trimmed)) {
-                    closeList();
+                    closeLists();
 
                     container.append(
                         document.createElement("hr")
@@ -422,7 +496,7 @@ document.addEventListener(
                     continue;
                 }
 
-                closeList();
+                closeLists();
 
                 const paragraphLines = [
                     trimmed,
@@ -433,7 +507,7 @@ document.addEventListener(
                 while (
                     index < lines.length &&
                     !isBlockStart(lines[index])
-                    ) {
+                ) {
                     paragraphLines.push(
                         lines[index].trim()
                     );

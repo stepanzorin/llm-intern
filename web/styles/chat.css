@@ -233,8 +233,18 @@
   padding-left: 24px;
 }
 
+.markdown li > ul,
+.markdown li > ol {
+  margin: 6px 0 4px;
+}
+
 .markdown li + li {
   margin-top: 5px;
+}
+
+.markdown li > ul > li,
+.markdown li > ol > li {
+  margin-top: 4px;
 }
 
 .markdown blockquote {
