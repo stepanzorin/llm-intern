@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cctype>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -17,9 +18,12 @@ namespace stz::intern {
 
 namespace {
 
-constexpr auto exact_frequent_query_score = std::size_t{1024};
-constexpr auto unordered_frequent_query_score = std::size_t{960};
-constexpr auto unordered_fuzzy_frequent_query_score = std::size_t{900};
+constexpr auto exact_frequent_query_score = std::size_t{10000};
+constexpr auto unordered_frequent_query_score = std::size_t{9300};
+constexpr auto unordered_fuzzy_frequent_query_score = std::size_t{8600};
+constexpr auto direct_frequent_query_min_score = std::size_t{7600};
+constexpr auto exact_glossary_heading_score = std::size_t{10000};
+constexpr auto direct_glossary_heading_min_score = std::size_t{7600};
 
 [[nodiscard]] bool is_markdown_file(const std::filesystem::path &filename) {
     auto extension = filename.extension().string();
@@ -272,6 +276,34 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     return damerau_levenshtein_distance(lhs_codepoints, rhs_codepoints, max_distance) <= max_distance;
 }
 
+[[nodiscard]] bool prefix_match_search_terms(const std::string_view lhs, const std::string_view rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
+
+    const auto lhs_codepoints = utf8_to_codepoints(lhs);
+    const auto rhs_codepoints = utf8_to_codepoints(rhs);
+    const auto min_size = std::min(lhs_codepoints.size(), rhs_codepoints.size());
+
+    if (min_size < 5) {
+        return false;
+    }
+
+    auto common_prefix_size = std::size_t{};
+
+    while (common_prefix_size < min_size && lhs_codepoints[common_prefix_size] == rhs_codepoints[common_prefix_size]) {
+        ++common_prefix_size;
+    }
+
+    const auto required_prefix_size = min_size >= 7 ? std::size_t{5} : std::size_t{4};
+
+    return common_prefix_size >= required_prefix_size;
+}
+
+[[nodiscard]] bool search_match_terms(const std::string_view lhs, const std::string_view rhs) {
+    return typo_match_terms(lhs, rhs) || prefix_match_search_terms(lhs, rhs);
+}
+
 [[nodiscard]] bool is_ascii_separator(const unsigned char byte) noexcept {
     if (byte >= 128) {
         return false;
@@ -338,8 +370,18 @@ void collapse_ascii_spaces(std::string &text) {
     return result;
 }
 
+[[nodiscard]] bool is_kept_short_search_term(const std::string_view term) noexcept {
+    constexpr auto short_terms = std::array{
+            std::string_view{"не"},
+            std::string_view{"но"},
+            std::string_view{"а"},
+    };
+
+    return std::ranges::find(short_terms, term) != short_terms.end();
+}
+
 [[nodiscard]] bool is_search_term_long_enough(const std::string_view term) noexcept {
-    return utf8_codepoints_count(term) >= 3;
+    return utf8_codepoints_count(term) >= 3 || is_kept_short_search_term(term);
 }
 
 [[nodiscard]] std::vector<std::string> make_search_terms(const std::string_view query) {
@@ -381,23 +423,34 @@ void collapse_ascii_spaces(std::string &text) {
 }
 
 [[nodiscard]] bool is_weak_intent_term(const std::string_view term) noexcept {
+    /*
+     * These are not domain words. They are only intent/noise words that users
+     * naturally add around the real request: "как", "что делать если",
+     * "каким образом", "нужно", etc.
+     */
     constexpr auto weak_terms = std::array{
-            std::string_view{"yclients"},   std::string_view{"что"},      std::string_view{"чем"},
-            std::string_view{"как"},        std::string_view{"где"},      std::string_view{"когда"},
-            std::string_view{"куда"},       std::string_view{"зачем"},    std::string_view{"почему"},
-            std::string_view{"кто"},        std::string_view{"кого"},     std::string_view{"кому"},
-            std::string_view{"какой"},      std::string_view{"какая"},    std::string_view{"какое"},
-            std::string_view{"какие"},      std::string_view{"для"},      std::string_view{"про"},
-            std::string_view{"без"},        std::string_view{"или"},      std::string_view{"если"},
-            std::string_view{"надо"},       std::string_view{"нужно"},    std::string_view{"можно"},
-            std::string_view{"такое"},      std::string_view{"это"},      std::string_view{"означает"},
-            std::string_view{"значит"},     std::string_view{"объясни"},  std::string_view{"поясни"},
-            std::string_view{"расскажи"},   std::string_view{"подскажи"}, std::string_view{"помоги"},
+            std::string_view{"yclients"},     std::string_view{"что"},       std::string_view{"чем"},
+            std::string_view{"как"},          std::string_view{"каким"},     std::string_view{"образом"},
+            std::string_view{"где"},          std::string_view{"когда"},     std::string_view{"куда"},
+            std::string_view{"зачем"},        std::string_view{"почему"},    std::string_view{"кто"},
+            std::string_view{"кого"},         std::string_view{"кому"},      std::string_view{"какой"},
+            std::string_view{"какая"},        std::string_view{"какое"},     std::string_view{"какие"},
+            std::string_view{"для"},          std::string_view{"про"},       std::string_view{"при"},
+            std::string_view{"без"},          std::string_view{"или"},       std::string_view{"если"},
+            std::string_view{"чтобы"},        std::string_view{"надо"},      std::string_view{"нужно"},
+            std::string_view{"нужен"},        std::string_view{"нужна"},     std::string_view{"нужны"},
+            std::string_view{"можно"},        std::string_view{"сделать"},   std::string_view{"сделай"},
+            std::string_view{"делать"},       std::string_view{"действия"},  std::string_view{"действовать"},
+            std::string_view{"поступать"},    std::string_view{"поступить"}, std::string_view{"такое"},
+            std::string_view{"это"},          std::string_view{"означает"},  std::string_view{"значит"},
+            std::string_view{"объясни"},      std::string_view{"поясни"},    std::string_view{"расскажи"},
+            std::string_view{"определение"},  std::string_view{"термин"},    std::string_view{"понятие"},
+            std::string_view{"значение"},     std::string_view{"подскажи"},  std::string_view{"помоги"},
             std::string_view{"пожалуйста"},
     };
 
     return std::ranges::any_of(weak_terms,
-                               [&](const std::string_view weak_term) { return typo_match_terms(term, weak_term); });
+                               [&](const std::string_view weak_term) { return search_match_terms(term, weak_term); });
 }
 
 [[nodiscard]] std::vector<std::string> make_effective_search_terms(std::vector<std::string> terms) {
@@ -412,181 +465,157 @@ void collapse_ascii_spaces(std::string &text) {
 
 [[nodiscard]] bool contains_term_fuzzy(const std::span<const std::string> terms,
                                        const std::string_view query_term) noexcept {
-    return std::ranges::any_of(terms, [&](const std::string &term) { return typo_match_terms(query_term, term); });
+    return std::ranges::any_of(terms, [&](const std::string &term) { return search_match_terms(query_term, term); });
 }
 
-[[nodiscard]] bool query_has_domain_marker(const std::span<const std::string> terms) noexcept {
-    constexpr auto domain_terms = std::array{
-            std::string_view{"yclients"},  std::string_view{"бариста"},    std::string_view{"кофе"},
-            std::string_view{"капучино"},  std::string_view{"латте"},      std::string_view{"раф"},
-            std::string_view{"эспрессо"},  std::string_view{"американо"},  std::string_view{"запись"},
-            std::string_view{"записи"},    std::string_view{"визит"},      std::string_view{"визита"},
-            std::string_view{"клиент"},    std::string_view{"клиента"},    std::string_view{"услуга"},
-            std::string_view{"услуги"},    std::string_view{"оплата"},     std::string_view{"оплаты"},
-            std::string_view{"скидка"},    std::string_view{"бонусы"},     std::string_view{"сертификат"},
-            std::string_view{"абонемент"}, std::string_view{"молоко"},     std::string_view{"сироп"},
-            std::string_view{"напиток"},   std::string_view{"кофемашина"}, std::string_view{"холдер"},
-            std::string_view{"питчер"},    std::string_view{"смена"},      std::string_view{"жалоба"},
-    };
-
-    return std::ranges::any_of(terms, [&](const std::string &term) {
-        return std::ranges::any_of(domain_terms, [&](const std::string_view domain_term) {
-            return typo_match_terms(term, domain_term);
-        });
-    });
+[[nodiscard]] bool contains_all_terms_exactly(const std::span<const std::string> needles,
+                                              const std::span<const std::string> haystack) noexcept {
+    return std::ranges::all_of(needles, [&](const std::string &term) { return contains_term(haystack, term); });
 }
 
-[[nodiscard]] bool is_optional_extra_term(const std::string_view term) noexcept {
-    constexpr auto optional_terms = std::array{
-            std::string_view{"клиент"},
-            std::string_view{"клиента"},
-            std::string_view{"клиенту"},
-            std::string_view{"клиентом"},
-            std::string_view{"визит"},
-            std::string_view{"визита"},
-            std::string_view{"визитом"},
-    };
-
-    return std::ranges::any_of(optional_terms, [&](const std::string_view optional_term) {
-        return typo_match_terms(term, optional_term);
-    });
+[[nodiscard]] bool contains_all_terms_fuzzy(const std::span<const std::string> needles,
+                                            const std::span<const std::string> haystack) noexcept {
+    return std::ranges::all_of(needles, [&](const std::string &term) { return contains_term_fuzzy(haystack, term); });
 }
 
-[[nodiscard]] std::size_t count_extra_strong_terms(const std::span<const std::string> query_terms,
-                                                   const std::span<const std::string> frequent_query_terms) noexcept {
-    auto extra_count = std::size_t{};
+[[nodiscard]] std::size_t count_exact_term_overlap(const std::span<const std::string> lhs,
+                                                   const std::span<const std::string> rhs) noexcept {
+    auto count = std::size_t{};
 
-    for (const auto &term : frequent_query_terms) {
-        if (is_weak_intent_term(term) || is_optional_extra_term(term)) {
-            continue;
-        }
-
-        if (!contains_term(query_terms, term)) {
-            ++extra_count;
+    for (const auto &term : lhs) {
+        if (contains_term(rhs, term)) {
+            ++count;
         }
     }
 
-    return extra_count;
+    return count;
 }
 
-[[nodiscard]] bool all_strong_query_terms_are_present_exactly(
+[[nodiscard]] std::size_t count_fuzzy_term_overlap(const std::span<const std::string> lhs,
+                                                   const std::span<const std::string> rhs) noexcept {
+    auto count = std::size_t{};
+    auto used_rhs = std::vector<bool>(rhs.size(), false);
+
+    for (const auto &lhs_term : lhs) {
+        for (auto index = std::size_t{}; index < rhs.size(); ++index) {
+            if (used_rhs[index]) {
+                continue;
+            }
+
+            if (!typo_match_terms(lhs_term, rhs[index])) {
+                continue;
+            }
+
+            used_rhs[index] = true;
+            ++count;
+            break;
+        }
+    }
+
+    return count;
+}
+
+[[nodiscard]] std::size_t bounded_subtract(const std::size_t value, const std::size_t delta) noexcept {
+    return value > delta ? value - delta : std::size_t{};
+}
+
+[[nodiscard]] std::size_t dice_score(const std::size_t overlap,
+                                     const std::size_t lhs_size,
+                                     const std::size_t rhs_size,
+                                     const std::size_t max_score) noexcept {
+    if (overlap == 0 || lhs_size == 0 || rhs_size == 0) {
+        return 0;
+    }
+
+    return (2 * overlap * max_score) / (lhs_size + rhs_size);
+}
+
+struct frequent_query_score_s {
+    std::size_t score = {};
+    knowledge_match_e match = knowledge_match_e::none;
+};
+
+[[nodiscard]] frequent_query_score_s score_frequent_query_terms(
         const std::span<const std::string> query_terms,
         const std::span<const std::string> frequent_query_terms) noexcept {
-    auto strong_terms_count = std::size_t{};
-
-    for (const auto &term : query_terms) {
-        if (is_weak_intent_term(term)) {
-            continue;
-        }
-
-        ++strong_terms_count;
-
-        if (!contains_term(frequent_query_terms, term)) {
-            return false;
-        }
+    if (query_terms.empty() || frequent_query_terms.empty()) {
+        return {};
     }
 
-    return strong_terms_count != 0;
+    if (query_terms.size() == frequent_query_terms.size() && contains_all_terms_exactly(query_terms, frequent_query_terms)) {
+        return {.score = exact_frequent_query_score, .match = knowledge_match_e::exact_frequent_query};
+    }
+
+    const auto exact_overlap = count_exact_term_overlap(query_terms, frequent_query_terms);
+    auto exact_score = dice_score(exact_overlap, query_terms.size(), frequent_query_terms.size(), unordered_frequent_query_score);
+
+    if (exact_overlap != 0 && contains_all_terms_exactly(frequent_query_terms, query_terms)) {
+        const auto extra_query_terms = query_terms.size() - frequent_query_terms.size();
+        exact_score = std::max(exact_score, bounded_subtract(std::size_t{9200}, extra_query_terms * 96));
+    }
+
+    if (query_terms.size() >= 2 && contains_all_terms_exactly(query_terms, frequent_query_terms)) {
+        const auto extra_frequent_query_terms = frequent_query_terms.size() - query_terms.size();
+        exact_score = std::max(exact_score, bounded_subtract(std::size_t{9100}, extra_frequent_query_terms * 96));
+    }
+
+    const auto fuzzy_overlap = count_fuzzy_term_overlap(query_terms, frequent_query_terms);
+    auto fuzzy_score = dice_score(fuzzy_overlap, query_terms.size(), frequent_query_terms.size(), unordered_fuzzy_frequent_query_score);
+
+    if (fuzzy_overlap != 0 && contains_all_terms_fuzzy(frequent_query_terms, query_terms)) {
+        const auto extra_query_terms = query_terms.size() > frequent_query_terms.size()
+                                       ? query_terms.size() - frequent_query_terms.size()
+                                       : std::size_t{};
+        fuzzy_score = std::max(fuzzy_score, bounded_subtract(std::size_t{8400}, extra_query_terms * 96));
+    }
+
+    if (query_terms.size() >= 2 && contains_all_terms_fuzzy(query_terms, frequent_query_terms)) {
+        const auto extra_frequent_query_terms = frequent_query_terms.size() > query_terms.size()
+                                                ? frequent_query_terms.size() - query_terms.size()
+                                                : std::size_t{};
+        fuzzy_score = std::max(fuzzy_score, bounded_subtract(std::size_t{8300}, extra_frequent_query_terms * 96));
+    }
+
+    if (exact_score >= fuzzy_score) {
+        return {.score = exact_score, .match = exact_score == 0 ? knowledge_match_e::none
+                                                                : knowledge_match_e::unordered_frequent_query};
+    }
+
+    return {.score = fuzzy_score, .match = knowledge_match_e::unordered_fuzzy_frequent_query};
 }
 
-[[nodiscard]] bool all_strong_query_terms_are_present_with_typos(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> frequent_query_terms) noexcept {
-    auto strong_terms_count = std::size_t{};
+[[nodiscard]] frequent_query_score_s best_frequent_query_score(const knowledge_document_s &document,
+                                                               const std::span<const std::string> query_terms) noexcept {
+    auto best = frequent_query_score_s{};
 
-    for (const auto &term : query_terms) {
-        if (is_weak_intent_term(term)) {
-            continue;
-        }
+    for (const auto &frequent_query_terms : document.frequent_query_terms) {
+        const auto score = score_frequent_query_terms(query_terms, frequent_query_terms);
 
-        ++strong_terms_count;
-
-        if (!contains_term_fuzzy(frequent_query_terms, term)) {
-            return false;
+        if (score.score > best.score) {
+            best = score;
         }
     }
 
-    return strong_terms_count != 0;
-}
-
-[[nodiscard]] std::size_t score_unordered_frequent_query(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> frequent_query_terms) noexcept {
-    if (!all_strong_query_terms_are_present_exactly(query_terms, frequent_query_terms)) {
-        return 0;
-    }
-
-    const auto extra_count = count_extra_strong_terms(query_terms, frequent_query_terms);
-
-    if (extra_count >= 4) {
-        return 0;
-    }
-
-    return unordered_frequent_query_score - extra_count * 64;
-}
-
-[[nodiscard]] std::size_t score_unordered_fuzzy_frequent_query(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> frequent_query_terms) noexcept {
-    if (!all_strong_query_terms_are_present_with_typos(query_terms, frequent_query_terms)) {
-        return 0;
-    }
-
-    const auto extra_count = count_extra_strong_terms(query_terms, frequent_query_terms);
-
-    if (extra_count >= 4) {
-        return 0;
-    }
-
-    return unordered_fuzzy_frequent_query_score - extra_count * 64;
-}
-
-[[nodiscard]] std::size_t best_unordered_frequent_query_score(const knowledge_document_s &document,
-                                                              const std::span<const std::string> query_terms) noexcept {
-    if (query_terms.size() < 2) {
-        return 0;
-    }
-
-    auto best_score = std::size_t{};
-
-    for (const auto &frequent_query : document.normalized_frequent_queries) {
-        const auto frequent_query_terms = make_search_terms(frequent_query);
-
-        if (frequent_query_terms.empty()) {
-            continue;
-        }
-
-        best_score = std::max(best_score, score_unordered_frequent_query(query_terms, frequent_query_terms));
-    }
-
-    return best_score;
-}
-
-[[nodiscard]] std::size_t best_unordered_fuzzy_frequent_query_score(
-        const knowledge_document_s &document,
-        const std::span<const std::string> query_terms) noexcept {
-    if (query_terms.size() < 2) {
-        return 0;
-    }
-
-    auto best_score = std::size_t{};
-
-    for (const auto &frequent_query : document.normalized_frequent_queries) {
-        const auto frequent_query_terms = make_search_terms(frequent_query);
-
-        if (frequent_query_terms.empty()) {
-            continue;
-        }
-
-        best_score = std::max(best_score, score_unordered_fuzzy_frequent_query(query_terms, frequent_query_terms));
-    }
-
-    return best_score;
+    return best;
 }
 
 [[nodiscard]] std::size_t count_exact_term_occurrences(const std::span<const std::string> terms,
                                                        const std::string_view term) noexcept {
     return static_cast<std::size_t>(std::ranges::count(terms, term));
+}
+
+[[nodiscard]] std::string join_search_terms(const std::span<const std::string> terms) {
+    auto result = std::string{};
+
+    for (const auto &term : terms) {
+        if (!result.empty()) {
+            result.push_back(' ');
+        }
+
+        result += term;
+    }
+
+    return result;
 }
 
 [[nodiscard]] std::string extract_title(const std::string_view content, const std::string &fallback) {
@@ -615,6 +644,72 @@ void collapse_ascii_spaces(std::string &text) {
     }
 
     return fallback;
+}
+
+[[nodiscard]] std::size_t markdown_heading_level(const std::string_view line) {
+    auto trimmed = std::string{line};
+    util::trim(trimmed);
+
+    auto level = std::size_t{};
+
+    while (level < trimmed.size() && trimmed[level] == '#') {
+        ++level;
+    }
+
+    if (level == 0 || level >= trimmed.size()) {
+        return 0;
+    }
+
+    const auto separator = static_cast<unsigned char>(trimmed[level]);
+
+    if (std::isspace(separator) == 0) {
+        return 0;
+    }
+
+    return level;
+}
+
+[[nodiscard]] bool is_second_level_markdown_heading(const std::string_view line) {
+    return markdown_heading_level(line) == 2;
+}
+
+[[nodiscard]] std::string raw_markdown_heading_text(const std::string_view line) {
+    auto text = std::string{line};
+    util::trim(text);
+
+    while (!text.empty() && text.front() == '#') {
+        text.erase(text.begin());
+    }
+
+    util::trim(text);
+
+    return text;
+}
+
+void strip_balanced_marker_edges(std::string &text, const std::string_view marker) {
+    while (text.size() >= marker.size() * 2 && text.starts_with(marker) && text.ends_with(marker)) {
+        text.erase(0, marker.size());
+        text.erase(text.size() - marker.size());
+        util::trim(text);
+    }
+}
+
+[[nodiscard]] std::string clean_glossary_term(const std::string_view heading_line) {
+    auto term = raw_markdown_heading_text(heading_line);
+
+    strip_balanced_marker_edges(term, "**");
+    strip_balanced_marker_edges(term, "__");
+    strip_balanced_marker_edges(term, "`");
+
+    return term;
+}
+
+[[nodiscard]] bool is_glossary_file(const std::string_view relative_filename) {
+    const auto filename_position = relative_filename.find_last_of('/');
+    const auto filename = filename_position == std::string_view::npos ? relative_filename
+                                                                      : relative_filename.substr(filename_position + 1);
+
+    return filename.starts_with("glossary_");
 }
 
 [[nodiscard]] bool is_markdown_heading(const std::string_view line) {
@@ -708,6 +803,84 @@ void remove_markdown_list_marker(std::string &line) {
     return result;
 }
 
+void flush_glossary_entry(std::vector<knowledge_document_s> &result,
+                          const std::string &relative_filename,
+                          const std::string &term,
+                          std::string body,
+                          const knowledge_source_e source,
+                          const workplace_role_e role) {
+    if (term.empty()) {
+        return;
+    }
+
+    util::trim(body);
+
+    if (body.empty()) {
+        return;
+    }
+
+    auto filename = std::format("{}#{}", relative_filename, term);
+
+    auto entry = knowledge_document_s{
+            .filename = std::move(filename),
+            .title = term,
+            .content = std::move(body),
+            .frequent_queries = {},
+            .normalized_filename = {},
+            .normalized_title = {},
+            .normalized_frequent_queries = {},
+            .source = source,
+            .role = role,
+    };
+
+    entry.normalized_filename = make_search_key(entry.filename);
+    entry.normalized_title = make_search_key(entry.title);
+
+    result.push_back(std::move(entry));
+}
+
+[[nodiscard]] std::vector<knowledge_document_s> extract_glossary_entries(const std::string_view content,
+                                                                         const std::string &relative_filename,
+                                                                         const knowledge_source_e source,
+                                                                         const workplace_role_e role) {
+    auto result = std::vector<knowledge_document_s>{};
+    auto current_term = std::string{};
+    auto current_body = std::string{};
+    auto inside_entry = false;
+    auto position = std::size_t{};
+
+    while (position <= content.size()) {
+        const auto line_end = content.find('\n', position);
+        const auto line = content.substr(
+                position,
+                line_end == std::string_view::npos ? content.size() - position : line_end - position);
+
+        if (is_second_level_markdown_heading(line)) {
+            flush_glossary_entry(result, relative_filename, current_term, std::move(current_body), source, role);
+
+            current_term = clean_glossary_term(line);
+            current_body.clear();
+            inside_entry = true;
+        } else if (inside_entry) {
+            if (!current_body.empty()) {
+                current_body.push_back('\n');
+            }
+
+            current_body += line;
+        }
+
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+
+        position = line_end + 1;
+    }
+
+    flush_glossary_entry(result, relative_filename, current_term, std::move(current_body), source, role);
+
+    return result;
+}
+
 [[nodiscard]] std::vector<std::string> normalize_frequent_queries(const std::span<const std::string> queries) {
     auto result = std::vector<std::string>{};
     auto seen = std::unordered_set<std::string>{};
@@ -723,6 +896,22 @@ void remove_markdown_list_marker(std::string &line) {
 
         if (seen.insert(normalized).second) {
             result.push_back(std::move(normalized));
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::vector<std::vector<std::string>> make_frequent_query_terms(
+        const std::span<const std::string> normalized_queries) {
+    auto result = std::vector<std::vector<std::string>>{};
+    result.reserve(normalized_queries.size());
+
+    for (const auto &query : normalized_queries) {
+        auto terms = make_effective_search_terms(make_search_terms(query));
+
+        if (!terms.empty()) {
+            result.push_back(std::move(terms));
         }
     }
 
@@ -753,7 +942,7 @@ void remove_markdown_list_marker(std::string &line) {
 }
 
 [[nodiscard]] std::optional<workplace_role_e> role_from_directory_name(const std::string_view directory_name) {
-    if (directory_name == "general") {
+    if (directory_name == "general" || directory_name == "first_aid" || directory_name == "emergency") {
         return workplace_role_e::general;
     }
 
@@ -797,7 +986,9 @@ void remove_markdown_list_marker(std::string &line) {
 
 [[nodiscard]] bool is_direct_match(const knowledge_match_e match) noexcept {
     return match == knowledge_match_e::exact_frequent_query || match == knowledge_match_e::unordered_frequent_query ||
-           match == knowledge_match_e::unordered_fuzzy_frequent_query;
+           match == knowledge_match_e::unordered_fuzzy_frequent_query ||
+           match == knowledge_match_e::exact_glossary_heading || match == knowledge_match_e::unordered_glossary_heading ||
+           match == knowledge_match_e::unordered_fuzzy_glossary_heading;
 }
 
 [[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_document_s &document,
@@ -844,6 +1035,9 @@ std::string_view to_string(const knowledge_match_e match) noexcept {
         case knowledge_match_e::exact_frequent_query: return "exact_frequent_query";
         case knowledge_match_e::unordered_frequent_query: return "unordered_frequent_query";
         case knowledge_match_e::unordered_fuzzy_frequent_query: return "unordered_fuzzy_frequent_query";
+        case knowledge_match_e::exact_glossary_heading: return "exact_glossary_heading";
+        case knowledge_match_e::unordered_glossary_heading: return "unordered_glossary_heading";
+        case knowledge_match_e::unordered_fuzzy_glossary_heading: return "unordered_fuzzy_glossary_heading";
         case knowledge_match_e::ranked: return "ranked";
     }
 
@@ -883,6 +1077,7 @@ KnowledgeStorage::KnowledgeStorage(std::filesystem::path directory, std::shared_
 
 void KnowledgeStorage::load() {
     m_documents.clear();
+    m_glossaries.clear();
 
     if (!std::filesystem::exists(m_directory)) {
         m_logger->warn("Knowledge directory does not exist: {}", m_directory.string());
@@ -903,6 +1098,21 @@ void KnowledgeStorage::load() {
         }
 
         auto content = util::read_text_file(entry.path());
+        const auto source = detect_source_type(relative_filename);
+
+        if (is_glossary_file(relative_filename)) {
+            auto entries = extract_glossary_entries(content, relative_filename, source, *role);
+
+            if (entries.empty()) {
+                m_logger->warn("Glossary file has no usable level-2 entries: {}", relative_filename);
+            }
+
+            m_glossaries.insert(m_glossaries.end(),
+                                std::make_move_iterator(entries.begin()),
+                                std::make_move_iterator(entries.end()));
+            continue;
+        }
+
         auto title = extract_title(content, entry.path().filename().string());
         auto frequent_queries = extract_frequent_queries(content);
 
@@ -914,18 +1124,20 @@ void KnowledgeStorage::load() {
                 .normalized_filename = {},
                 .normalized_title = {},
                 .normalized_frequent_queries = {},
-                .source = detect_source_type(relative_filename),
+                .source = source,
                 .role = *role,
         };
 
         document.normalized_filename = make_search_key(document.filename);
         document.normalized_title = make_search_key(document.title);
         document.normalized_frequent_queries = normalize_frequent_queries(document.frequent_queries);
+        document.frequent_query_terms = make_frequent_query_terms(document.normalized_frequent_queries);
 
         m_documents.push_back(std::move(document));
     }
 
     std::ranges::sort(m_documents, {}, &knowledge_document_s::filename);
+    std::ranges::sort(m_glossaries, {}, &knowledge_document_s::filename);
 
     auto general_count = std::size_t{};
     auto barista_count = std::size_t{};
@@ -951,7 +1163,10 @@ void KnowledgeStorage::load() {
         }
     }
 
-    m_logger->info("Loaded {} knowledge markdown files from '{}'", m_documents.size(), m_directory.string());
+    m_logger->info("Loaded {} knowledge markdown files and {} glossary entries from '{}'",
+                   m_documents.size(),
+                   m_glossaries.size(),
+                   m_directory.string());
 
     m_logger->info("Knowledge map: general={}, barista={}, seller={}, beauty_admin={}, custom={}",
                    general_count,
@@ -978,22 +1193,14 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return {};
     }
 
-    const auto original_terms = make_search_terms(normalized_query);
-    auto terms = make_effective_search_terms(original_terms);
+    const auto terms = make_effective_search_terms(make_search_terms(normalized_query));
 
     if (terms.empty()) {
         return {};
     }
 
-    if (!query_has_domain_marker(original_terms)) {
-        m_logger->debug("Knowledge retrieval skipped: query has no domain marker");
-        return {};
-    }
-
-    auto direct_results = std::vector<retrieved_knowledge_s>{};
-    auto ranked_results = std::vector<retrieved_knowledge_s>{};
-
-    ranked_results.reserve(std::min(options.limit * 2, m_documents.size()));
+    auto frequent_query_results = std::vector<retrieved_knowledge_s>{};
+    frequent_query_results.reserve(std::min(options.limit * 2, m_documents.size()));
 
     for (const auto &document : m_documents) {
         if (!document_matches_options(document, options)) {
@@ -1001,30 +1208,44 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         }
 
         if (has_exact_frequent_query_match(document, normalized_query)) {
-            direct_results.push_back(make_retrieved_document(document,
-                                                             exact_frequent_query_score,
-                                                             options.max_chars_per_document,
-                                                             knowledge_match_e::exact_frequent_query));
+            frequent_query_results.push_back(make_retrieved_document(document,
+                                                                     exact_frequent_query_score,
+                                                                     options.max_chars_per_document,
+                                                                     knowledge_match_e::exact_frequent_query));
             continue;
         }
 
-        const auto unordered_score = best_unordered_frequent_query_score(document, terms);
+        const auto frequent_score = best_frequent_query_score(document, terms);
 
-        if (unordered_score != 0) {
-            direct_results.push_back(make_retrieved_document(document,
-                                                             unordered_score,
-                                                             options.max_chars_per_document,
-                                                             knowledge_match_e::unordered_frequent_query));
+        if (frequent_score.score < direct_frequent_query_min_score) {
             continue;
         }
 
-        const auto unordered_fuzzy_score = best_unordered_fuzzy_frequent_query_score(document, terms);
+        frequent_query_results.push_back(make_retrieved_document(document,
+                                                                 frequent_score.score,
+                                                                 options.max_chars_per_document,
+                                                                 frequent_score.match));
+    }
 
-        if (unordered_fuzzy_score != 0) {
-            direct_results.push_back(make_retrieved_document(document,
-                                                             unordered_fuzzy_score,
-                                                             options.max_chars_per_document,
-                                                             knowledge_match_e::unordered_fuzzy_frequent_query));
+    if (!frequent_query_results.empty()) {
+        std::ranges::sort(frequent_query_results, [](const retrieved_knowledge_s &lhs,
+                                                     const retrieved_knowledge_s &rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+
+            return lhs.filename < rhs.filename;
+        });
+
+        frequent_query_results.resize(1);
+        return frequent_query_results;
+    }
+
+    auto ranked_results = std::vector<retrieved_knowledge_s>{};
+    ranked_results.reserve(std::min(options.limit, m_documents.size()));
+
+    for (const auto &document : m_documents) {
+        if (!document_matches_options(document, options)) {
             continue;
         }
 
@@ -1032,7 +1253,7 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
 
         if (score < options.min_ranked_score) {
             if (score != 0) {
-                m_logger->debug("Knowledge candidate rejected by score threshold: {} score={} min_score={}",
+                m_logger->debug("Knowledge candidate rejected by fallback score threshold: {} score={} min_score={}",
                                 document.filename,
                                 score,
                                 options.min_ranked_score);
@@ -1043,19 +1264,6 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
 
         ranked_results.push_back(
                 make_retrieved_document(document, score, options.max_chars_per_document, knowledge_match_e::ranked));
-    }
-
-    if (!direct_results.empty()) {
-        std::ranges::sort(direct_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
-            if (lhs.score != rhs.score) {
-                return lhs.score > rhs.score;
-            }
-
-            return lhs.filename < rhs.filename;
-        });
-
-        direct_results.resize(1);
-        return direct_results;
     }
 
     std::ranges::sort(ranked_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
@@ -1073,10 +1281,98 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
     return ranked_results;
 }
 
+std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
+        const std::string_view query,
+        const knowledge_retrieve_options_s &options) const {
+    if (m_glossaries.empty() || options.limit == 0) {
+        return {};
+    }
+
+    const auto normalized_query = make_search_key(query);
+
+    if (normalized_query.empty()) {
+        return {};
+    }
+
+    const auto terms = make_effective_search_terms(make_search_terms(normalized_query));
+
+    if (terms.empty()) {
+        return {};
+    }
+
+    const auto normalized_effective_query = join_search_terms(terms);
+
+    auto results = std::vector<retrieved_knowledge_s>{};
+    results.reserve(std::min(options.limit, m_glossaries.size()));
+
+    for (const auto &entry : m_glossaries) {
+        if (!document_matches_options(entry, options)) {
+            continue;
+        }
+
+        const auto heading_terms = make_search_terms(entry.normalized_title);
+        auto score = score_frequent_query_terms(terms, heading_terms);
+
+        if (entry.normalized_title == normalized_query || entry.normalized_title == normalized_effective_query) {
+            score = {.score = exact_glossary_heading_score, .match = knowledge_match_e::exact_glossary_heading};
+        } else if (!normalized_effective_query.empty() &&
+                   entry.normalized_title.find(normalized_effective_query) != std::string::npos) {
+            score.score = std::max(score.score, std::size_t{9400});
+            score.match = knowledge_match_e::unordered_glossary_heading;
+        } else if (!normalized_effective_query.empty() &&
+                   normalized_effective_query.find(entry.normalized_title) != std::string::npos) {
+            score.score = std::max(score.score, std::size_t{9000});
+            score.match = knowledge_match_e::unordered_glossary_heading;
+        }
+
+        if (score.score < direct_glossary_heading_min_score) {
+            continue;
+        }
+
+        auto match = knowledge_match_e::none;
+
+        switch (score.match) {
+            case knowledge_match_e::exact_frequent_query:
+                match = knowledge_match_e::exact_glossary_heading;
+                break;
+            case knowledge_match_e::unordered_frequent_query:
+                match = knowledge_match_e::unordered_glossary_heading;
+                break;
+            case knowledge_match_e::unordered_fuzzy_frequent_query:
+                match = knowledge_match_e::unordered_fuzzy_glossary_heading;
+                break;
+            case knowledge_match_e::exact_glossary_heading:
+            case knowledge_match_e::unordered_glossary_heading:
+            case knowledge_match_e::unordered_fuzzy_glossary_heading:
+                match = score.match;
+                break;
+            case knowledge_match_e::none:
+            case knowledge_match_e::ranked:
+                continue;
+        }
+
+        results.push_back(make_retrieved_document(entry, score.score, options.max_chars_per_document, match));
+    }
+
+    std::ranges::sort(results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+
+        return lhs.filename < rhs.filename;
+    });
+
+    if (results.size() > 1) {
+        results.resize(1);
+    }
+
+    return results;
+}
+
 std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
         const std::span<const std::string> filenames,
         const knowledge_retrieve_options_s &options) const {
-    if (m_documents.empty() || filenames.empty() || options.limit == 0) {
+    if ((m_documents.empty() && m_glossaries.empty()) || filenames.empty() || options.limit == 0) {
         return {};
     }
 
@@ -1084,38 +1380,51 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
     auto seen = std::unordered_set<std::string>{};
 
     result.reserve(std::min(options.limit, filenames.size()));
-    seen.reserve(filenames.size());
 
     for (const auto &filename : filenames) {
-        if (result.size() >= options.limit) {
-            break;
-        }
-
         if (!seen.insert(filename).second) {
             continue;
         }
 
-        const auto it = std::ranges::find_if(m_documents, [&](const knowledge_document_s &document) noexcept {
-            return document.filename == filename && document_matches_options(document, options);
-        });
+        const auto find_in = [&filename](const std::vector<knowledge_document_s> &documents) {
+            return std::ranges::find_if(
+                    documents,
+                    [&filename](const knowledge_document_s &document) noexcept {
+                        return document.filename == filename;
+                    });
+        };
 
-        if (it == m_documents.end()) {
-            m_logger->debug("Knowledge file referenced by chat history was not found: {}", filename);
+        auto document_it = find_in(m_documents);
+        const auto *document = document_it == m_documents.end() ? nullptr : &*document_it;
+
+        if (document == nullptr) {
+            auto glossary_it = find_in(m_glossaries);
+            document = glossary_it == m_glossaries.end() ? nullptr : &*glossary_it;
+        }
+
+        if (document == nullptr) {
+            m_logger->debug("Contextual knowledge source from history was not found: {}", filename);
             continue;
         }
 
-        result.push_back(make_retrieved_document(*it,
-                                                 exact_frequent_query_score,
-                                                 options.max_chars_per_document,
-                                                 knowledge_match_e::ranked));
+        if (!document_matches_options(*document, options)) {
+            m_logger->debug("Contextual knowledge source from history was rejected by options: {}", filename);
+            continue;
+        }
+
+        result.push_back(make_retrieved_document(*document, 1, options.max_chars_per_document, knowledge_match_e::ranked));
+
+        if (result.size() >= options.limit) {
+            break;
+        }
     }
 
     return result;
 }
 
-bool KnowledgeStorage::empty() const noexcept { return m_documents.empty(); }
+bool KnowledgeStorage::empty() const noexcept { return m_documents.empty() && m_glossaries.empty(); }
 
-std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size(); }
+std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size() + m_glossaries.size(); }
 
 bool KnowledgeStorage::document_matches_options(const knowledge_document_s &document,
                                                 const knowledge_retrieve_options_s &options) noexcept {

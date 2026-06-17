@@ -31,6 +31,9 @@ enum class knowledge_match_e {
     exact_frequent_query,
     unordered_frequent_query,
     unordered_fuzzy_frequent_query,
+    exact_glossary_heading,
+    unordered_glossary_heading,
+    unordered_fuzzy_glossary_heading,
     ranked,
 };
 
@@ -52,6 +55,7 @@ struct knowledge_document_s {
     std::string normalized_filename = {};
     std::string normalized_title = {};
     std::vector<std::string> normalized_frequent_queries = {};
+    std::vector<std::vector<std::string>> frequent_query_terms = {};
 
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
@@ -85,6 +89,10 @@ public:
     [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve(std::string_view query,
                                                               const knowledge_retrieve_options_s &options) const;
 
+    [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve_glossary(
+            std::string_view query,
+            const knowledge_retrieve_options_s &options) const;
+
     [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve_by_filenames(
             std::span<const std::string> filenames,
             const knowledge_retrieve_options_s &options) const;
@@ -96,6 +104,7 @@ public:
 private:
     std::filesystem::path m_directory;
     std::vector<knowledge_document_s> m_documents;
+    std::vector<knowledge_document_s> m_glossaries;
     std::shared_ptr<spdlog::logger> m_logger;
 
     [[nodiscard]] static bool document_matches_options(const knowledge_document_s &document,
