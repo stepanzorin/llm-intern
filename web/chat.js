@@ -1440,6 +1440,10 @@ document.addEventListener(
 
         await refreshApplicationState();
 
+        if (!generationActive && !input.disabled) {
+            focusInputWithoutScroll();
+        }
+
         statePollTimer =
             window.setInterval(
                 refreshApplicationState,
