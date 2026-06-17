@@ -1207,14 +1207,6 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        if (has_exact_frequent_query_match(document, normalized_query)) {
-            frequent_query_results.push_back(make_retrieved_document(document,
-                                                                     exact_frequent_query_score,
-                                                                     options.max_chars_per_document,
-                                                                     knowledge_match_e::exact_frequent_query));
-            continue;
-        }
-
         const auto frequent_score = best_frequent_query_score(document, terms);
 
         if (frequent_score.score < direct_frequent_query_min_score) {
@@ -1483,12 +1475,6 @@ std::size_t KnowledgeStorage::score_document(const knowledge_document_s &documen
     }
 
     return score;
-}
-
-bool KnowledgeStorage::has_exact_frequent_query_match(const knowledge_document_s &document,
-                                                      const std::string_view normalized_query) noexcept {
-    return std::ranges::any_of(document.normalized_frequent_queries,
-                               [&](const std::string &frequent_query) { return frequent_query == normalized_query; });
 }
 
 } // namespace stz::intern

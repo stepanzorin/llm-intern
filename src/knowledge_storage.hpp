@@ -113,9 +113,6 @@ private:
     [[nodiscard]] static std::size_t score_document(const knowledge_document_s &document,
                                                     std::span<const std::string> terms,
                                                     std::string_view normalized_query) noexcept;
-
-    [[nodiscard]] static bool has_exact_frequent_query_match(const knowledge_document_s &document,
-                                                             std::string_view normalized_query) noexcept;
 };
 
 } // namespace stz::intern
