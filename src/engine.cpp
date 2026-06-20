@@ -296,8 +296,8 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
             const auto second = static_cast<unsigned char>(text[index + 1]);
             const auto third = static_cast<unsigned char>(text[index + 2]);
             const auto fourth = static_cast<unsigned char>(text[index + 3]);
-            codepoint = static_cast<char32_t>(((first & 0x07) << 18) | ((second & 0x3F) << 12) |
-                                              ((third & 0x3F) << 6) | (fourth & 0x3F));
+            codepoint = static_cast<char32_t>(((first & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) |
+                                              (fourth & 0x3F));
             length = 4;
         } else {
             result.push_back(static_cast<char>(first));
@@ -347,6 +347,19 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
     return std::ranges::any_of(prefixes, [text](const std::string_view prefix) { return text.starts_with(prefix); });
 }
 
+[[nodiscard]] bool looks_like_procedural_request(const std::string_view user_text) {
+    const auto normalized_text = normalize_user_query_for_relation(user_text);
+
+    constexpr auto procedural_prefixes = std::array{
+            std::string_view{"как "},
+            std::string_view{"а как "},
+            std::string_view{"каким образом "},
+            std::string_view{"а каким образом "},
+    };
+
+    return starts_with_any(normalized_text, std::span{procedural_prefixes});
+}
+
 [[nodiscard]] bool contains_any(const std::string_view text,
                                 const std::span<const std::string_view> fragments) noexcept {
     return std::ranges::any_of(fragments, [text](const std::string_view fragment) { return text.contains(fragment); });
@@ -364,50 +377,135 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
            match == knowledge_match_e::unordered_fuzzy_glossary_heading;
 }
 
-[[nodiscard]] bool has_glossary_knowledge(const std::span<const retrieved_knowledge_s> knowledge) noexcept {
-    return std::ranges::any_of(knowledge, [](const retrieved_knowledge_s &item) noexcept {
-        return is_glossary_match(item.match);
-    });
+[[nodiscard]] bool is_direct_knowledge_answer_candidate(
+        const std::span<const retrieved_knowledge_s> knowledge) noexcept {
+    if (knowledge.size() != 1) {
+        return false;
+    }
+
+    const auto match = knowledge.front().match;
+
+    return match == knowledge_match_e::exact_frequent_query || match == knowledge_match_e::unordered_frequent_query ||
+           match == knowledge_match_e::unordered_fuzzy_frequent_query || is_glossary_match(match);
 }
 
-[[nodiscard]] bool looks_like_glossary_question(const std::string_view user_text) {
+[[nodiscard]] bool looks_like_instruction_analysis_request(const std::string_view user_text) {
     const auto normalized_text = normalize_user_query_for_relation(user_text);
 
     if (normalized_text.empty()) {
         return false;
     }
 
-    constexpr auto definition_prefixes = std::array{
-            std::string_view{"что такое "},
-            std::string_view{"что это "},
-            std::string_view{"что за "},
-            std::string_view{"что значит "},
-            std::string_view{"что означает "},
-            std::string_view{"объясни что такое "},
-            std::string_view{"объясни термин "},
-            std::string_view{"поясни термин "},
-            std::string_view{"дай определение "},
+    /*
+     * These requests may still need the same knowledge file as a direct
+     * instruction request, but the user is not asking to paste the instruction.
+     *
+     * Example:
+     *   "как удалить запись"                                  -> direct instruction is fine
+     *   "какие проблемы могут возникнуть при удалении записи" -> give the file to LLM
+     *
+     * So this predicate must only block direct Markdown inlining.
+     * It must not prevent KnowledgeStorage from selecting the best file.
+     */
+    constexpr auto analysis_prefixes = std::array{
+            std::string_view{"какие проблемы"},
+            std::string_view{"какая проблема"},
+            std::string_view{"какие могут быть проблемы"},
+            std::string_view{"какие могут возникнуть проблемы"},
+            std::string_view{"какие риски"},
+            std::string_view{"какой риск"},
+            std::string_view{"какие нюансы"},
+            std::string_view{"какие ограничения"},
+            std::string_view{"какие исключения"},
+            std::string_view{"какие последствия"},
+            std::string_view{"что может пойти не так"},
+            std::string_view{"что может случиться"},
+            std::string_view{"что может произойти"},
+            std::string_view{"что будет если"},
+            std::string_view{"что будет при"},
+            std::string_view{"что произойдет если"},
+            std::string_view{"что произойдёт если"},
+            std::string_view{"что учитывать"},
+            std::string_view{"что нужно учитывать"},
+            std::string_view{"что важно учитывать"},
+            std::string_view{"что проверить перед"},
+            std::string_view{"что проверить при"},
+            std::string_view{"на что обратить внимание"},
+            std::string_view{"на что нужно обратить внимание"},
+            std::string_view{"на что важно обратить внимание"},
+            std::string_view{"можно ли"},
+            std::string_view{"нужно ли"},
+            std::string_view{"надо ли"},
+            std::string_view{"обязательно ли"},
+            std::string_view{"нельзя ли"},
+            std::string_view{"почему"},
+            std::string_view{"зачем"},
+            std::string_view{"когда можно"},
+            std::string_view{"когда нельзя"},
+            std::string_view{"в каких случаях"},
+            std::string_view{"чем отличается"},
+            std::string_view{"в чем разница"},
+            std::string_view{"в чём разница"},
     };
 
-    if (starts_with_any(normalized_text, std::span{definition_prefixes})) {
+    if (starts_with_any(normalized_text, std::span{analysis_prefixes})) {
         return true;
     }
 
-    constexpr auto definition_fragments = std::array{
-            std::string_view{" что такое "},
-            std::string_view{" что это "},
-            std::string_view{" что за "},
-            std::string_view{" что значит "},
-            std::string_view{" что означает "},
-            std::string_view{" определение "},
-            std::string_view{" термин "},
+    constexpr auto analysis_fragments = std::array{
+            std::string_view{" какие проблемы "},
+            std::string_view{" проблемы могут "},
+            std::string_view{" может возникнуть "},
+            std::string_view{" могут возникнуть "},
+            std::string_view{" может быть проблема "},
+            std::string_view{" могут быть проблемы "},
+            std::string_view{" что может пойти не так "},
+            std::string_view{" пойти не так "},
+            std::string_view{" какие риски "},
+            std::string_view{" риски "},
+            std::string_view{" риск "},
+            std::string_view{" последствия "},
+            std::string_view{" нюансы "},
+            std::string_view{" ограничения "},
+            std::string_view{" исключения "},
+            std::string_view{" подводные камни "},
+            std::string_view{" обратить внимание "},
+            std::string_view{" что учитывать "},
+            std::string_view{" что проверить перед "},
+            std::string_view{" что проверить при "},
     };
 
-    if (contains_any(normalized_text, std::span{definition_fragments})) {
-        return true;
+    return contains_any(std::format(" {} ", normalized_text), std::span{analysis_fragments});
+}
+
+[[nodiscard]] bool has_glossary_knowledge(const std::span<const retrieved_knowledge_s> knowledge) noexcept {
+    return std::ranges::any_of(knowledge, [](const retrieved_knowledge_s &item) noexcept {
+        return is_glossary_match(item.match);
+    });
+}
+
+[[nodiscard]] bool should_answer_without_llm(const std::string_view user_text,
+                                             const std::span<const retrieved_knowledge_s> knowledge) {
+    if (!is_direct_knowledge_answer_candidate(knowledge)) {
+        return false;
     }
 
-    return normalized_text == "что такое" || normalized_text == "определение" || normalized_text == "термин";
+    if (has_glossary_knowledge(knowledge)) {
+        return !looks_like_procedural_request(user_text);
+    }
+
+    return !looks_like_instruction_analysis_request(user_text);
+}
+
+[[nodiscard]] bool knowledge_contains_any_source_filename(const std::span<const retrieved_knowledge_s> knowledge,
+                                                          const std::span<const std::string> filenames) noexcept {
+    if (knowledge.empty() || filenames.empty()) {
+        return false;
+    }
+
+    return std::ranges::any_of(knowledge, [filenames](const retrieved_knowledge_s &item) noexcept {
+        return std::ranges::find(filenames, item.filename) != filenames.end();
+    });
 }
 
 void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
@@ -440,13 +538,11 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 
 [[nodiscard]] bool looks_like_explicit_follow_up(const std::string_view normalized_text) noexcept {
     constexpr auto follow_up_prefixes = std::array{
-            std::string_view{"а "},
-            std::string_view{"и "},
             std::string_view{"а если"},
             std::string_view{"а что если"},
             std::string_view{"а как"},
-            std::string_view{"а можно"},
             std::string_view{"а надо"},
+            std::string_view{"а можно"},
             std::string_view{"а нужно"},
             std::string_view{"тогда"},
             std::string_view{"тогда "},
@@ -457,6 +553,8 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"дальше"},
             std::string_view{"что дальше"},
             std::string_view{"а дальше"},
+            std::string_view{"а "},
+            std::string_view{"и "},
     };
 
     if (starts_with_any(normalized_text, std::span{follow_up_prefixes})) {
@@ -467,9 +565,19 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"объясни подробнее"},
             std::string_view{"распиши подробнее"},
             std::string_view{"подробнее"},
+            std::string_view{"распиши"},
+            std::string_view{"подробно"},
+            std::string_view{"конкретнее"},
+            std::string_view{"конкретней"},
             std::string_view{"продолжи"},
             std::string_view{"приведи пример"},
             std::string_view{"конкретные шаги"},
+            std::string_view{"ничего не понял"},
+            std::string_view{"ничего не поняла"},
+            std::string_view{"ни хуя не понял"},
+            std::string_view{"ни хуя не поняла"},
+            std::string_view{"нихуя не понял"},
+            std::string_view{"нихуя не поняла"},
             std::string_view{"какие конкретные шаги"},
             std::string_view{"для этого случая"},
             std::string_view{"в этом случае"},
@@ -479,6 +587,9 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"какого формата"},
             std::string_view{"какой формат"},
             std::string_view{"какой шаблон"},
+            std::string_view{"может ли"},
+            std::string_view{"можно ли"},
+            std::string_view{"возможно ли"},
             std::string_view{"что за файл"},
             std::string_view{"что за таблица"},
             std::string_view{"пример фразы"},
@@ -495,6 +606,10 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"сократи"},
             std::string_view{"сокращенно"},
             std::string_view{"сокращённо"},
+            std::string_view{"объясни проще"},
+            std::string_view{"расскажи проще"},
+            std::string_view{"ответь проще"},
+            std::string_view{"напиши проще"},
             std::string_view{"сделай кратко"},
             std::string_view{"сделай коротко"},
             std::string_view{"сделай короче"},
@@ -502,6 +617,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"в двух словах"},
             std::string_view{"одним предложением"},
             std::string_view{"переформулируй"},
+            std::string_view{"перефразируй"},
             std::string_view{"перепиши"},
             std::string_view{"простыми словами"},
             std::string_view{"составь определение"},
@@ -521,8 +637,13 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"уточни шаги"},
             std::string_view{"проверь порядок действий"},
             std::string_view{"правильно ли я понимаю"},
+            std::string_view{"правильно ли я понял"},
+            std::string_view{"правильно ли я поняла"},
             std::string_view{"верно ли я понимаю"},
+            std::string_view{"верно ли я понял"},
+            std::string_view{"верно ли я поняла"},
             std::string_view{"я правильно понял"},
+            std::string_view{"я правильно поняла"},
             std::string_view{"я правильно понимаю"},
             std::string_view{"то есть надо"},
             std::string_view{"то есть нужно"},
@@ -541,6 +662,13 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"пример ответа клиенту"},
             std::string_view{"пример сообщения клиенту"},
             std::string_view{"скрипт ответа"},
+            std::string_view{"что за "},
+            std::string_view{"чё за "},
+            std::string_view{"че за "},
+            std::string_view{"чё такое "},
+            std::string_view{"че такое "},
+            std::string_view{"чё означает "},
+            std::string_view{"че означает "},
     };
 
     constexpr auto exact_follow_up_requests = std::array{
@@ -549,15 +677,26 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"покороче"},
             std::string_view{"короче"},
             std::string_view{"подробнее"},
+            std::string_view{"подробно"},
+            std::string_view{"конкретнее"},
+            std::string_view{"конкретней"},
             std::string_view{"конкретные шаги"},
             std::string_view{"какие конкретные шаги"},
             std::string_view{"какой файл"},
             std::string_view{"какая таблица"},
+            std::string_view{"что за"},
+            std::string_view{"чё за"},
+            std::string_view{"че за"},
+            std::string_view{"чё такое"},
+            std::string_view{"че такое"},
+            std::string_view{"чё означает"},
+            std::string_view{"че означает"},
             std::string_view{"какой формат"},
             std::string_view{"какого формата"},
             std::string_view{"продолжи"},
             std::string_view{"сократи"},
             std::string_view{"переформулируй"},
+            std::string_view{"перефразируй"},
             std::string_view{"перепиши"},
             std::string_view{"простыми словами"},
             std::string_view{"составь определение"},
@@ -617,9 +756,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 
 [[nodiscard]] bool contains_relation_term(const std::span<const std::string> terms,
                                           const std::string_view expected) noexcept {
-    return std::ranges::any_of(terms, [expected](const std::string &term) noexcept {
-        return term == expected;
-    });
+    return std::ranges::any_of(terms, [expected](const std::string &term) noexcept { return term == expected; });
 }
 
 [[nodiscard]] bool contains_any_relation_term(const std::span<const std::string> terms,
@@ -680,24 +817,12 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
     }
 
     constexpr auto order_or_confirmation_fragments = std::array{
-            std::string_view{"перед "},
-            std::string_view{"до "},
-            std::string_view{"после"},
-            std::string_view{"сначала"},
-            std::string_view{"потом"},
-            std::string_view{"затем"},
-            std::string_view{"или после"},
-            std::string_view{"или до"},
-            std::string_view{"или неважно"},
-            std::string_view{"неважно"},
-            std::string_view{"обязательно"},
-            std::string_view{"должна"},
-            std::string_view{"должен"},
-            std::string_view{"должны"},
-            std::string_view{"надо ли"},
-            std::string_view{"нужно ли"},
-            std::string_view{"можно ли"},
-            std::string_view{"нужно сначала"},
+            std::string_view{"перед "},       std::string_view{"до "},         std::string_view{"после"},
+            std::string_view{"сначала"},      std::string_view{"потом"},       std::string_view{"затем"},
+            std::string_view{"или после"},    std::string_view{"или до"},      std::string_view{"или неважно"},
+            std::string_view{"неважно"},      std::string_view{"обязательно"}, std::string_view{"должна"},
+            std::string_view{"должен"},       std::string_view{"должны"},      std::string_view{"надо ли"},
+            std::string_view{"нужно ли"},     std::string_view{"можно ли"},    std::string_view{"нужно сначала"},
             std::string_view{"надо сначала"},
     };
 
@@ -762,6 +887,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 [[nodiscard]] chat_relation_kind_e classify_relation_to_previous_answer(
         const std::string_view user_text,
         const bool has_previous_anchor,
+        const bool current_retrieval_returns_previous_source,
         const std::span<const retrieved_knowledge_s> knowledge) {
     if (!has_previous_anchor) {
         return chat_relation_kind_e::standalone;
@@ -774,6 +900,11 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
     }
 
     if (looks_like_explicit_follow_up(normalized_text)) {
+        return chat_relation_kind_e::follow_up;
+    }
+
+    if (has_any_retrieved_knowledge(knowledge) && current_retrieval_returns_previous_source &&
+        !is_direct_knowledge_answer_candidate(knowledge)) {
         return chat_relation_kind_e::follow_up;
     }
 
@@ -922,12 +1053,32 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
             .min_ranked_score = m_config.min_ranked_knowledge_score,
     };
 
-    const auto glossary_knowledge = looks_like_glossary_question(user_text)
-                                    ? m_knowledge.retrieve_glossary(user_text, retrieve_options)
-                                    : std::vector<retrieved_knowledge_s>{};
+    /*
+     * Answer routing order:
+     * 1. For procedural requests, prefer document lookup over m_documents,
+     *    starting from "Частые запросы пользователя".
+     * 2. Otherwise, prefer strict glossary heading lookup over m_glossaries.
+     * 3. LLM fallback with whatever context retrieval could safely provide.
+     */
+    const auto procedural_request = looks_like_procedural_request(user_text);
+    const auto glossary_knowledge = m_knowledge.retrieve_glossary(user_text, retrieve_options);
 
-    const auto primary_knowledge = !glossary_knowledge.empty() ? glossary_knowledge
-                                                               : m_knowledge.retrieve(user_text, retrieve_options);
+    const auto document_knowledge =
+            procedural_request || glossary_knowledge.empty()
+                    ? m_knowledge.retrieve(user_text, retrieve_options)
+                    : std::vector<retrieved_knowledge_s>{};
+
+    const auto primary_knowledge = [&] {
+        if (procedural_request && !document_knowledge.empty()) {
+            return document_knowledge;
+        }
+
+        if (!glossary_knowledge.empty()) {
+            return glossary_knowledge;
+        }
+
+        return document_knowledge;
+    }();
 
     for (const auto &item : primary_knowledge) {
         m_logger->info("Retrieved knowledge: {} "
@@ -939,17 +1090,21 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                        to_string(item.match));
     }
 
-    const auto relation = classify_relation_to_previous_answer(
-            user_text,
-            !m_last_topic_anchor_ids.empty(),
-            primary_knowledge);
+    const auto inherited_source_filenames = make_source_filenames_from_relatives(m_last_topic_anchor_ids);
+    const auto current_retrieval_returns_previous_source = knowledge_contains_any_source_filename(
+            primary_knowledge,
+            inherited_source_filenames);
+
+    const auto relation = classify_relation_to_previous_answer(user_text,
+                                                               !m_last_topic_anchor_ids.empty(),
+                                                               current_retrieval_returns_previous_source,
+                                                               primary_knowledge);
 
     auto knowledge = primary_knowledge;
 
     if (relation == chat_relation_kind_e::follow_up) {
-        const auto inherited_source_filenames = make_source_filenames_from_relatives(m_last_topic_anchor_ids);
-
-        const auto inherited_knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames, retrieve_options);
+        const auto inherited_knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames,
+                                                                           retrieve_options);
 
         knowledge = merge_contextual_knowledge(inherited_knowledge, primary_knowledge);
 
@@ -975,7 +1130,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
      * llama-server и LlamaClient в этой ветке
      * вообще не используются.
      */
-    if (relation == chat_relation_kind_e::standalone && can_answer_without_llm(knowledge)) {
+    if (relation == chat_relation_kind_e::standalone && should_answer_without_llm(user_text, knowledge)) {
         auto source_filenames = make_source_filenames(knowledge);
 
         auto answer_body = make_direct_answer(knowledge);
@@ -1037,6 +1192,15 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
         };
     }
 
+    if (relation == chat_relation_kind_e::standalone && is_direct_knowledge_answer_candidate(knowledge) &&
+        looks_like_instruction_analysis_request(user_text)) {
+        m_logger->info("Direct knowledge match will be used as LLM context because the user asks for analysis: "
+                       "file={} score={} match={}",
+                       knowledge.front().filename,
+                       knowledge.front().score,
+                       to_string(knowledge.front().match));
+    }
+
     /*
      * До этой точки прямого совпадения с готовым
      * Markdown-скриптом не найдено.
@@ -1060,10 +1224,11 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
         m_history[user_index].relatives.clear();
     }
 
-    m_logger->info("LLM request relation: {} previous_anchor_ids={} relatives_used={}",
+    m_logger->info("LLM request relation: {} previous_anchor_ids={} relatives_used={} same_source={}",
                    relation_kind_name(relation),
                    m_last_topic_anchor_ids.size(),
-                   m_history[user_index].relatives.size());
+                   m_history[user_index].relatives.size(),
+                   current_retrieval_returns_previous_source);
 
     save_history();
 
@@ -1138,10 +1303,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
             .relatives = assistant_relatives,
     });
 
-    m_last_topic_anchor_ids = make_topic_anchor_ids(
-            std::move(assistant_relatives),
-            user_id,
-            assistant_id);
+    m_last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
 
     save_history();
 
@@ -1244,8 +1406,7 @@ void LlamaEngine::rebuild_last_topic_anchor() {
         auto anchor_ids = it->relatives;
         anchor_ids.push_back(it->id);
 
-        m_last_topic_anchor_ids = trim_topic_anchor_ids(
-                std::move(anchor_ids));
+        m_last_topic_anchor_ids = trim_topic_anchor_ids(std::move(anchor_ids));
 
         return;
     }
@@ -1296,32 +1457,33 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
 
     if (knowledge.empty()) {
         return std::format(
-            "Роль: AI-помощник стажёра в сфере услуг({}).\n"
-            "Язык: Русский (просто, понятно, лаконично).\n"
-            "Правило: База знаний пуста. Сформируй ответ ИСКЛЮЧИТЕЛЬНО на основе своих общих знаний.\n"
-            "Формат ответа: готовая инструкция для стажёра, а не подсказка для поиска.\n"
-            "Запрещено: выдумывать регламенты компании, скидки, возвраты и компенсации.\n"
-            "Запрещено: предлагать поисковые запросы, ключевые слова, имена файлов или способы искать информацию в базе знаний.\n"
-            "Если вопрос не связан с работой стажёра — откажи: \"Бот помогает только по рабочим вопросам.\".",
-            role_str
-        );
+                "Роль: AI-помощник стажёра в сфере услуг({}).\n"
+                "Язык: Русский (просто, понятно, лаконично).\n"
+                "Правило: База знаний пуста. Сформируй ответ ИСКЛЮЧИТЕЛЬНО на основе своих общих знаний.\n"
+                "Формат ответа: готовая инструкция для стажёра, а не подсказка для поиска.\n"
+                "Запрещено: выдумывать регламенты компании, скидки, возвраты и компенсации.\n"
+                "Запрещено: предлагать поисковые запросы, ключевые слова, имена файлов или способы искать информацию в "
+                "базе знаний.\n"
+                "Если вопрос не связан с работой стажёра — откажи: \"Бот помогает только по рабочим вопросам.\".",
+                role_str);
     }
 
     if (has_glossary_knowledge(knowledge)) {
         auto prompt = std::format(
-            "Роль: AI-помощник стажёра ({}).\n"
-            "Язык: Русский (просто, понятно, лаконично).\n"
-            "Режим: словарь терминов.\n"
-            "Правила:\n"
-            "1. Главный источник — контекст в <knowledge_base>.\n"
-            "2. Если в контексте есть определение нужного термина, отвечай этим определением, не превращай ответ в пошаговую инструкцию.\n"
-            "3. Не выдумывай определения, регламенты, правила, скидки, возвраты и компенсации.\n"
-            "4. Не предлагай пользователю поисковые запросы, ключевые слова, имена файлов или способы искать информацию в базе знаний.\n"
-            "5. Если прямого определения нет, честно скажи это и дай короткое осторожное объяснение отдельно.\n"
-            "6. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
-            "<knowledge_base>\n",
-            role_str
-        );
+                "Роль: AI-помощник стажёра ({}).\n"
+                "Язык: Русский (просто, понятно, лаконично).\n"
+                "Режим: словарь терминов.\n"
+                "Правила:\n"
+                "1. Главный источник — контекст в <knowledge_base>.\n"
+                "2. Если в контексте есть определение нужного термина, отвечай этим определением, не превращай ответ в "
+                "пошаговую инструкцию.\n"
+                "3. Не выдумывай определения, регламенты, правила, скидки, возвраты и компенсации.\n"
+                "4. Не предлагай пользователю поисковые запросы, ключевые слова, имена файлов или способы искать "
+                "информацию в базе знаний.\n"
+                "5. Если прямого определения нет, честно скажи это и дай короткое осторожное объяснение отдельно.\n"
+                "6. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
+                "<knowledge_base>\n",
+                role_str);
 
         for (const auto &item : knowledge) {
             prompt += std::format("<glossary name=\"{}\" term=\"{}\">\n{}\n</glossary>\n",
@@ -1336,18 +1498,18 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
     }
 
     auto prompt = std::format(
-        "Роль: AI-помощник стажёра ({}).\n"
-        "Язык: Русский (просто, понятно, лаконично).\n"
-        "Правила:\n"
-        "1. Отвечай строго по теме работы и обслуживания клиентов.\n"
-        "2. Главный источник — контекст в <knowledge_base>. Формат ответа: готовая инструкция для стажёра.\n"
-        "3. Категорически запрещено выдумывать: шаги, правила, скидки, возвраты, компенсации.\n"
-        "4. Не предлагай пользователю поисковые запросы, ключевые слова, имена файлов или способы искать информацию в базе знаний.\n"
-        "5. Если прямого регламента нет, честно скажи это и дай осторожную общую рекомендацию отдельно.\n"
-        "6. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
-        "<knowledge_base>\n",
-        role_str
-    );
+            "Роль: AI-помощник стажёра ({}).\n"
+            "Язык: Русский (просто, понятно, лаконично).\n"
+            "Правила:\n"
+            "1. Отвечай строго по теме работы и обслуживания клиентов.\n"
+            "2. Главный источник — контекст в <knowledge_base>. Формат ответа: готовая инструкция для стажёра.\n"
+            "3. Категорически запрещено выдумывать: шаги, правила, скидки, возвраты, компенсации.\n"
+            "4. Не предлагай пользователю поисковые запросы, ключевые слова, имена файлов или способы искать "
+            "информацию в базе знаний.\n"
+            "5. Если прямого регламента нет, честно скажи это и дай осторожную общую рекомендацию отдельно.\n"
+            "6. Если вопрос вне роли или контекста — откажи: \"Бот помогает только по рабочим вопросам.\".\n\n"
+            "<knowledge_base>\n",
+            role_str);
 
     for (const auto &item : knowledge) {
         prompt += std::format("<doc name=\"{}\">\n{}\n</doc>\n", item.filename, item.content);
@@ -1378,21 +1540,25 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
                 .role = chat_role_e::system,
                 .name = "follow_up_mode",
 
-                .content =
-                        "Текущий пользовательский запрос является уточнением к предыдущему ответу. "
-                        "Обязательно используй предыдущие сообщения ниже как основной контекст. "
-                        "Если пользователь просит «кратко», «коротко», «сократи», «подробнее», "
-                        "«переформулируй», «составь определение», «что проверить», "
-                        "«уточни порядок действий», «правильно ли я понимаю» или задаёт похожую короткую команду, "
-                        "это не новая тема и не вопрос вне роли. "
-                        "В таком случае измени или уточни именно предыдущий ответ: сократи, дополни, "
-                        "сформулируй определение, составь чеклист, проверь понимание пользователя или уточни порядок действий. "
-                        "Если пользователь спрашивает о порядке действий, например «до или после», отвечай как продолжение предыдущего сценария. "
-                        "Если пользователь просит конкретные шаги для одного условия из предыдущей инструкции, не повторяй весь сценарий: "
-                        "дай только шаги для этого условия. "
-                        "Если вопрос короткий и неполный, восстанавливай смысл из предыдущего ответа и <knowledge_base>. "
-                        "Не предлагай поисковые запросы, ключевые слова или имена файлов. "
-                        "Не пиши блок источников: приложение добавит его автоматически.",
+                .content = "Текущий пользовательский запрос является уточнением к предыдущему ответу. "
+                           "Обязательно используй предыдущие сообщения ниже как основной контекст. "
+                           "Если пользователь просит «кратко», «коротко», «сократи», «подробнее», "
+                           "«подробно», «конкретнее», «переформулируй», «перефразируй», "
+                           "«составь определение», «что проверить», «уточни порядок действий», "
+                           "«правильно ли я понимаю/понял/поняла» или задаёт похожую короткую команду, "
+                           "это не новая тема и не вопрос вне роли. "
+                           "В таком случае измени или уточни именно предыдущий ответ: сократи, дополни, "
+                           "сформулируй определение, составь чеклист, проверь понимание пользователя или уточни "
+                           "порядок действий. "
+                           "Если пользователь спрашивает о порядке действий, например «до или после», отвечай как "
+                           "продолжение предыдущего сценария. "
+                           "Если пользователь просит конкретные шаги для одного условия из предыдущей инструкции, не "
+                           "повторяй весь сценарий: "
+                           "дай только шаги для этого условия. "
+                           "Если вопрос короткий и неполный, восстанавливай смысл из предыдущего ответа и "
+                           "<knowledge_base>. "
+                           "Не предлагай поисковые запросы, ключевые слова или имена файлов. "
+                           "Не пиши блок источников: приложение добавит его автоматически.",
 
                 .created_at = util::make_local_timestamp(),
 
@@ -1523,14 +1689,7 @@ bool LlamaEngine::can_answer_without_llm(const std::span<const retrieved_knowled
      * KnowledgeStorage должен вернуть один-единственный
      * документ с прямым совпадением.
      */
-    if (knowledge.size() != 1) {
-        return false;
-    }
-
-    const auto match = knowledge.front().match;
-
-    return match == knowledge_match_e::exact_frequent_query || match == knowledge_match_e::unordered_frequent_query ||
-           match == knowledge_match_e::unordered_fuzzy_frequent_query || is_glossary_match(match);
+    return is_direct_knowledge_answer_candidate(knowledge);
 }
 
 std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_knowledge_s> knowledge) {

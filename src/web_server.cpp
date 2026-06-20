@@ -552,7 +552,7 @@ void WebServer::open_browser() const noexcept {
      * - /chat.html;
      * - /session_expired.html.
      */
-    const auto target_url = url() + "/";
+    const auto target_url = url() + "/chat.html"; // TODO: remove only `chat.html`, '/' will leave
 
     try {
 #ifdef STZ_INTERN_PLATFORM_WINDOWS

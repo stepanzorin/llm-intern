@@ -464,24 +464,42 @@ document.addEventListener(
                 }
 
                 const quoteMatch =
-                    /^>\s?(.*)$/.exec(trimmed);
+                    /^\s*>\s?(.*)$/.exec(line);
 
                 if (quoteMatch !== null) {
                     closeLists();
+
+                    const quoteLines = [];
+
+                    while (index < lines.length) {
+                        const nestedQuoteMatch =
+                            /^\s*>\s?(.*)$/.exec(
+                                lines[index]
+                            );
+
+                        if (nestedQuoteMatch === null) {
+                            break;
+                        }
+
+                        quoteLines.push(
+                            nestedQuoteMatch[1]
+                        );
+
+                        ++index;
+                    }
 
                     const quote =
                         document.createElement(
                             "blockquote"
                         );
 
-                    appendInlineMarkdown(
+                    renderMarkdown(
                         quote,
-                        quoteMatch[1]
+                        quoteLines.join("\n")
                     );
 
                     container.append(quote);
 
-                    ++index;
                     continue;
                 }
 
