@@ -33,7 +33,7 @@ namespace {
     config.engine = engine_config_s{
             .history_file = application_directory / "message_history.json",
             .knowledge_directory = application_directory / "knowledge",
-            .workplace_role = workplace_role_e::beauty_admin,
+            .workplace_role = workplace_role_e::barista,
             .max_knowledge_documents = 2,
             .max_knowledge_chars_per_document = 3000,
             .min_ranked_knowledge_score = 512,

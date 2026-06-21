@@ -320,14 +320,12 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     }
 
     constexpr auto long_suffixes = std::array{
-            std::string_view{"ениями"}, std::string_view{"ение"}, std::string_view{"ении"},
-            std::string_view{"ения"},   std::string_view{"ению"}, std::string_view{"ением"},
-            std::string_view{"иями"},   std::string_view{"ями"},  std::string_view{"ами"},
-            std::string_view{"ого"},    std::string_view{"ему"},  std::string_view{"ыми"},
-            std::string_view{"ими"},    std::string_view{"ить"},  std::string_view{"ать"},
-            std::string_view{"ять"},    std::string_view{"еть"},  std::string_view{"уть"},
-            std::string_view{"ешь"},    std::string_view{"ете"},  std::string_view{"ют"},
-            std::string_view{"ет"},     std::string_view{"ит"},
+            std::string_view{"ениями"}, std::string_view{"ение"},  std::string_view{"ении"}, std::string_view{"ения"},
+            std::string_view{"ению"},   std::string_view{"ением"}, std::string_view{"иями"}, std::string_view{"ями"},
+            std::string_view{"ами"},    std::string_view{"ого"},   std::string_view{"ему"},  std::string_view{"ыми"},
+            std::string_view{"ими"},    std::string_view{"ить"},   std::string_view{"ать"},  std::string_view{"ять"},
+            std::string_view{"еть"},    std::string_view{"уть"},   std::string_view{"ешь"},  std::string_view{"ете"},
+            std::string_view{"ют"},     std::string_view{"ет"},    std::string_view{"ит"},
     };
 
     for (const auto suffix : long_suffixes) {
@@ -347,9 +345,14 @@ void append_utf8(const char32_t codepoint, std::string &result) {
     }
 
     constexpr auto short_suffixes = std::array{
-            std::string_view{"а"}, std::string_view{"я"}, std::string_view{"у"},
-            std::string_view{"ю"}, std::string_view{"е"}, std::string_view{"ы"},
-            std::string_view{"и"}, std::string_view{"ь"},
+            std::string_view{"а"},
+            std::string_view{"я"},
+            std::string_view{"у"},
+            std::string_view{"ю"},
+            std::string_view{"е"},
+            std::string_view{"ы"},
+            std::string_view{"и"},
+            std::string_view{"ь"},
     };
 
     for (const auto suffix : short_suffixes) {
@@ -511,28 +514,27 @@ void collapse_ascii_spaces(std::string &text) {
      * "каким образом", "нужно", etc.
      */
     constexpr auto weak_terms = std::array{
-            std::string_view{"yclients"},    std::string_view{"что"},       std::string_view{"чем"},
-            std::string_view{"че"},          std::string_view{"чё"},        std::string_view{"как"},
-            std::string_view{"каким"},       std::string_view{"образом"},
-            std::string_view{"где"},         std::string_view{"когда"},     std::string_view{"куда"},
-            std::string_view{"зачем"},       std::string_view{"почему"},    std::string_view{"кто"},
-            std::string_view{"кого"},        std::string_view{"кому"},      std::string_view{"какой"},
-            std::string_view{"какая"},       std::string_view{"какое"},     std::string_view{"какие"},
-            std::string_view{"для"},         std::string_view{"про"},       std::string_view{"при"},
-            std::string_view{"без"},         std::string_view{"или"},       std::string_view{"если"},
-            std::string_view{"чтобы"},       std::string_view{"надо"},      std::string_view{"нужно"},
-            std::string_view{"нужен"},       std::string_view{"нужна"},     std::string_view{"нужны"},
-            std::string_view{"можно"},       std::string_view{"сделать"},   std::string_view{"сделай"},
-            std::string_view{"делать"},      std::string_view{"действия"},  std::string_view{"действовать"},
-            std::string_view{"поступать"},   std::string_view{"поступить"}, std::string_view{"это"},
-            std::string_view{"такое"},       std::string_view{"означает"},  std::string_view{"обозначает"},
-            std::string_view{"значит"},      std::string_view{"объясни"},   std::string_view{"поясни"},
-            std::string_view{"расскажи"},
-            std::string_view{"определение"}, std::string_view{"термин"},    std::string_view{"понятие"},
-            std::string_view{"значение"},    std::string_view{"подскажи"},  std::string_view{"помоги"},
-            std::string_view{"пожалуйста"},  std::string_view{"проблема"},  std::string_view{"проблемы"},
-            std::string_view{"могут"},       std::string_view{"может"},     std::string_view{"возникнуть"},
-            std::string_view{"возникнут"},   std::string_view{"возникают"}, std::string_view{"появиться"},
+            std::string_view{"yclients"},    std::string_view{"что"},         std::string_view{"чем"},
+            std::string_view{"че"},          std::string_view{"чё"},          std::string_view{"как"},
+            std::string_view{"каким"},       std::string_view{"образом"},     std::string_view{"где"},
+            std::string_view{"когда"},       std::string_view{"куда"},        std::string_view{"зачем"},
+            std::string_view{"почему"},      std::string_view{"кто"},         std::string_view{"кого"},
+            std::string_view{"кому"},        std::string_view{"какой"},       std::string_view{"какая"},
+            std::string_view{"какое"},       std::string_view{"какие"},       std::string_view{"для"},
+            std::string_view{"про"},         std::string_view{"при"},         std::string_view{"без"},
+            std::string_view{"или"},         std::string_view{"если"},        std::string_view{"чтобы"},
+            std::string_view{"надо"},        std::string_view{"нужно"},       std::string_view{"нужен"},
+            std::string_view{"нужна"},       std::string_view{"нужны"},       std::string_view{"можно"},
+            std::string_view{"сделать"},     std::string_view{"сделай"},      std::string_view{"делать"},
+            std::string_view{"действия"},    std::string_view{"действовать"}, std::string_view{"поступать"},
+            std::string_view{"поступить"},   std::string_view{"это"},         std::string_view{"такое"},
+            std::string_view{"означает"},    std::string_view{"обозначает"},  std::string_view{"значит"},
+            std::string_view{"объясни"},     std::string_view{"поясни"},      std::string_view{"расскажи"},
+            std::string_view{"определение"}, std::string_view{"термин"},      std::string_view{"понятие"},
+            std::string_view{"значение"},    std::string_view{"подскажи"},    std::string_view{"помоги"},
+            std::string_view{"пожалуйста"},  std::string_view{"проблема"},    std::string_view{"проблемы"},
+            std::string_view{"могут"},       std::string_view{"может"},       std::string_view{"возникнуть"},
+            std::string_view{"возникнут"},   std::string_view{"возникают"},   std::string_view{"появиться"},
             std::string_view{"появятся"},
     };
 
@@ -697,8 +699,7 @@ struct frequent_query_score_s {
     }
 
     if (contains_all_terms_exactly(query_terms, heading_terms)) {
-        return {.score = unordered_glossary_heading_score,
-                .match = knowledge_match_e::unordered_glossary_heading};
+        return {.score = unordered_glossary_heading_score, .match = knowledge_match_e::unordered_glossary_heading};
     }
 
     if (contains_all_terms_fuzzy(query_terms, heading_terms)) {
@@ -743,30 +744,14 @@ struct frequent_query_score_s {
      * by raw instruction inlining.
      */
     constexpr auto suffixes = std::array{
-            std::string_view{"ениями"},
-            std::string_view{"аниями"},
-            std::string_view{"ением"},
-            std::string_view{"анием"},
-            std::string_view{"ении"},
-            std::string_view{"ание"},
-            std::string_view{"ания"},
-            std::string_view{"анию"},
-            std::string_view{"аний"},
-            std::string_view{"ение"},
-            std::string_view{"ения"},
-            std::string_view{"ению"},
-            std::string_view{"ений"},
-            std::string_view{"овать"},
-            std::string_view{"евать"},
-            std::string_view{"ывать"},
-            std::string_view{"ивать"},
-            std::string_view{"нуть"},
-            std::string_view{"ести"},
-            std::string_view{"ить"},
-            std::string_view{"ать"},
-            std::string_view{"ять"},
-            std::string_view{"еть"},
-            std::string_view{"уть"},
+            std::string_view{"ениями"}, std::string_view{"аниями"}, std::string_view{"ением"},
+            std::string_view{"анием"},  std::string_view{"ении"},   std::string_view{"ание"},
+            std::string_view{"ания"},   std::string_view{"анию"},   std::string_view{"аний"},
+            std::string_view{"ение"},   std::string_view{"ения"},   std::string_view{"ению"},
+            std::string_view{"ений"},   std::string_view{"овать"},  std::string_view{"евать"},
+            std::string_view{"ывать"},  std::string_view{"ивать"},  std::string_view{"нуть"},
+            std::string_view{"ести"},   std::string_view{"ить"},    std::string_view{"ать"},
+            std::string_view{"ять"},    std::string_view{"еть"},    std::string_view{"уть"},
     };
 
     for (const auto suffix : suffixes) {
@@ -826,9 +811,8 @@ struct frequent_query_score_s {
     });
 }
 
-[[nodiscard]] std::size_t score_ranked_context_query_terms(
-        const std::span<const std::string> query_terms,
-        const std::span<const std::string> candidate_terms) {
+[[nodiscard]] std::size_t score_ranked_context_query_terms(const std::span<const std::string> query_terms,
+                                                           const std::span<const std::string> candidate_terms) {
     if (query_terms.empty() || candidate_terms.empty()) {
         return {};
     }
@@ -865,9 +849,8 @@ struct frequent_query_score_s {
     return score;
 }
 
-[[nodiscard]] std::size_t best_ranked_context_query_score(
-        const knowledge_document_s &document,
-        const std::span<const std::string> query_terms) {
+[[nodiscard]] std::size_t best_ranked_context_query_score(const knowledge_document_s &document,
+                                                          const std::span<const std::string> query_terms) {
     auto best = score_ranked_context_query_terms(query_terms, make_search_terms(document.normalized_title));
 
     for (const auto &frequent_query_terms : document.frequent_query_terms) {
@@ -907,16 +890,13 @@ struct frequent_query_score_s {
 
 [[nodiscard]] bool contains_term_by_recall(const std::span<const std::string> terms,
                                            const std::string_view query_term) {
-    return std::ranges::any_of(terms, [&](const std::string &term) {
-        return recall_match_terms(query_term, term);
-    });
+    return std::ranges::any_of(terms, [&](const std::string &term) { return recall_match_terms(query_term, term); });
 }
 
 [[nodiscard]] bool contains_all_terms_by_recall(const std::span<const std::string> needles,
                                                 const std::span<const std::string> haystack) {
-    return std::ranges::all_of(needles, [&](const std::string &term) {
-        return contains_term_by_recall(haystack, term);
-    });
+    return std::ranges::all_of(needles,
+                               [&](const std::string &term) { return contains_term_by_recall(haystack, term); });
 }
 
 [[nodiscard]] std::size_t count_recall_term_overlap(const std::span<const std::string> lhs,
@@ -1033,14 +1013,41 @@ void strip_balanced_marker_edges(std::string &text, const std::string_view marke
     }
 }
 
-[[nodiscard]] std::string clean_glossary_term(const std::string_view heading_line) {
-    auto term = raw_markdown_heading_text(heading_line);
+[[nodiscard]] std::string clean_glossary_term(std::string term) {
+    util::trim(term);
 
     strip_balanced_marker_edges(term, "**");
     strip_balanced_marker_edges(term, "__");
     strip_balanced_marker_edges(term, "`");
 
     return term;
+}
+
+[[nodiscard]] std::vector<std::string> extract_glossary_aliases(const std::string_view heading_line) {
+    auto heading = clean_glossary_term(raw_markdown_heading_text(heading_line));
+    auto result = std::vector<std::string>{};
+    auto seen = std::unordered_set<std::string>{};
+    auto position = std::size_t{};
+
+    while (position <= heading.size()) {
+        const auto separator = heading.find(';', position);
+        auto alias = clean_glossary_term(
+                heading.substr(position,
+                               separator == std::string::npos ? heading.size() - position : separator - position));
+        auto normalized_alias = make_search_key(alias);
+
+        if (!normalized_alias.empty() && seen.insert(normalized_alias).second) {
+            result.push_back(std::move(alias));
+        }
+
+        if (separator == std::string::npos) {
+            break;
+        }
+
+        position = separator + 1;
+    }
+
+    return result;
 }
 
 [[nodiscard]] bool is_glossary_file(const std::string_view relative_filename) {
@@ -1142,13 +1149,34 @@ void remove_markdown_list_marker(std::string &line) {
     return result;
 }
 
+[[nodiscard]] std::vector<std::string> normalize_search_keys(const std::span<const std::string> values) {
+    auto result = std::vector<std::string>{};
+    auto seen = std::unordered_set<std::string>{};
+
+    result.reserve(values.size());
+
+    for (const auto &value : values) {
+        auto normalized = make_search_key(value);
+
+        if (normalized.empty()) {
+            continue;
+        }
+
+        if (seen.insert(normalized).second) {
+            result.push_back(std::move(normalized));
+        }
+    }
+
+    return result;
+}
+
 void flush_glossary_entry(std::vector<knowledge_document_s> &result,
                           const std::string &relative_filename,
-                          const std::string &term,
+                          std::vector<std::string> aliases,
                           std::string body,
                           const knowledge_source_e source,
                           const workplace_role_e role) {
-    if (term.empty()) {
+    if (aliases.empty()) {
         return;
     }
 
@@ -1158,22 +1186,26 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
         return;
     }
 
-    auto filename = std::format("{}#{}", relative_filename, term);
+    auto title = aliases.front();
+    auto filename = std::format("{}#{}", relative_filename, title);
 
     auto entry = knowledge_document_s{
             .filename = std::move(filename),
-            .title = term,
+            .title = std::move(title),
             .content = std::move(body),
             .frequent_queries = {},
+            .glossary_aliases = std::move(aliases),
             .normalized_filename = {},
             .normalized_title = {},
             .normalized_frequent_queries = {},
+            .normalized_glossary_aliases = {},
             .source = source,
             .role = role,
     };
 
     entry.normalized_filename = make_search_key(entry.filename);
     entry.normalized_title = make_search_key(entry.title);
+    entry.normalized_glossary_aliases = normalize_search_keys(entry.glossary_aliases);
 
     result.push_back(std::move(entry));
 }
@@ -1183,7 +1215,7 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
                                                                          const knowledge_source_e source,
                                                                          const workplace_role_e role) {
     auto result = std::vector<knowledge_document_s>{};
-    auto current_term = std::string{};
+    auto current_aliases = std::vector<std::string>{};
     auto current_body = std::string{};
     auto inside_entry = false;
     auto position = std::size_t{};
@@ -1195,9 +1227,14 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
                 line_end == std::string_view::npos ? content.size() - position : line_end - position);
 
         if (is_second_level_markdown_heading(line)) {
-            flush_glossary_entry(result, relative_filename, current_term, std::move(current_body), source, role);
+            flush_glossary_entry(result,
+                                 relative_filename,
+                                 std::move(current_aliases),
+                                 std::move(current_body),
+                                 source,
+                                 role);
 
-            current_term = clean_glossary_term(line);
+            current_aliases = extract_glossary_aliases(line);
             current_body.clear();
             inside_entry = true;
         } else if (inside_entry) {
@@ -1215,28 +1252,7 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
         position = line_end + 1;
     }
 
-    flush_glossary_entry(result, relative_filename, current_term, std::move(current_body), source, role);
-
-    return result;
-}
-
-[[nodiscard]] std::vector<std::string> normalize_frequent_queries(const std::span<const std::string> queries) {
-    auto result = std::vector<std::string>{};
-    auto seen = std::unordered_set<std::string>{};
-
-    result.reserve(queries.size());
-
-    for (const auto &query : queries) {
-        auto normalized = make_search_key(query);
-
-        if (normalized.empty()) {
-            continue;
-        }
-
-        if (seen.insert(normalized).second) {
-            result.push_back(std::move(normalized));
-        }
-    }
+    flush_glossary_entry(result, relative_filename, std::move(current_aliases), std::move(current_body), source, role);
 
     return result;
 }
@@ -1461,16 +1477,18 @@ void KnowledgeStorage::load() {
                 .title = std::move(title),
                 .content = std::move(content),
                 .frequent_queries = std::move(frequent_queries),
+                .glossary_aliases = {},
                 .normalized_filename = {},
                 .normalized_title = {},
                 .normalized_frequent_queries = {},
+                .normalized_glossary_aliases = {},
                 .source = source,
                 .role = *role,
         };
 
         document.normalized_filename = make_search_key(document.filename);
         document.normalized_title = make_search_key(document.title);
-        document.normalized_frequent_queries = normalize_frequent_queries(document.frequent_queries);
+        document.normalized_frequent_queries = normalize_search_keys(document.frequent_queries);
         document.frequent_query_terms = make_frequent_query_terms(document.normalized_frequent_queries);
 
         m_documents.push_back(std::move(document));
@@ -1585,10 +1603,11 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
 
         if (score < ranked_context_query_min_score) {
             if (score != 0) {
-                m_logger->debug("Knowledge candidate rejected by ranked context query threshold: {} score={} min_score={}",
-                                document.filename,
-                                score,
-                                ranked_context_query_min_score);
+                m_logger->debug(
+                        "Knowledge candidate rejected by ranked context query threshold: {} score={} min_score={}",
+                        document.filename,
+                        score,
+                        ranked_context_query_min_score);
             }
 
             continue;
@@ -1690,11 +1709,29 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
             continue;
         }
 
-        const auto heading_terms = make_search_terms(entry.normalized_title);
-        auto score = score_glossary_heading_terms(terms, heading_terms);
+        auto score = frequent_query_score_s{};
 
-        if (entry.normalized_title == normalized_query || entry.normalized_title == normalized_effective_query) {
-            score = {.score = exact_glossary_heading_score, .match = knowledge_match_e::exact_glossary_heading};
+        const auto score_alias = [&](const std::string_view normalized_alias) {
+            auto alias_score = score_glossary_heading_terms(terms, make_search_terms(normalized_alias));
+
+            if (normalized_alias == normalized_query || normalized_alias == normalized_effective_query) {
+                alias_score = {
+                        .score = exact_glossary_heading_score,
+                        .match = knowledge_match_e::exact_glossary_heading,
+                };
+            }
+
+            if (alias_score.score > score.score) {
+                score = alias_score;
+            }
+        };
+
+        if (entry.normalized_glossary_aliases.empty()) {
+            score_alias(entry.normalized_title);
+        } else {
+            for (const auto &alias : entry.normalized_glossary_aliases) {
+                score_alias(alias);
+            }
         }
 
         if (score.score < direct_glossary_heading_min_score) {

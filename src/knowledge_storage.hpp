@@ -51,10 +51,12 @@ struct knowledge_document_s {
     std::string content = {};
 
     std::vector<std::string> frequent_queries = {};
+    std::vector<std::string> glossary_aliases = {};
 
     std::string normalized_filename = {};
     std::string normalized_title = {};
     std::vector<std::string> normalized_frequent_queries = {};
+    std::vector<std::string> normalized_glossary_aliases = {};
     std::vector<std::vector<std::string>> frequent_query_terms = {};
 
     knowledge_source_e source = knowledge_source_e::builtin;
