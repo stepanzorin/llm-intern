@@ -48,6 +48,8 @@ enum class chat_message_status_e {
 
 [[nodiscard]] chat_message_status_e chat_message_status_from_string(std::string_view status);
 
+[[nodiscard]] std::string make_chat_model_content(std::string_view text, chat_role_e role);
+
 struct chat_message_s {
     chat_role_e role = chat_role_e::user;
     std::string name = "Я";
@@ -63,6 +65,13 @@ struct chat_visible_message_s {
     std::string name = {};
 };
 
+struct chat_context_state_s {
+    std::string topic = {};
+    std::vector<std::string> recent_user_messages = {};
+    std::string last_answer_excerpt = {};
+    std::vector<std::string> source_files = {};
+};
+
 struct chat_history_entry_s {
     std::uint64_t id = {};
     chat_answer_kind_e answer_kind = chat_answer_kind_e::unknown;
@@ -73,6 +82,8 @@ struct chat_history_entry_s {
 
     std::vector<std::string> source_files = {};
     std::vector<std::uint64_t> relatives = {};
+
+    std::optional<chat_context_state_s> context_state = std::nullopt;
 };
 
 [[nodiscard]] std::vector<chat_history_entry_s> load_chat_history(const std::filesystem::path &filename,

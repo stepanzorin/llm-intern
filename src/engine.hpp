@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,6 +33,18 @@ struct engine_config_s {
     std::size_t max_knowledge_documents = 2;
     std::size_t max_knowledge_chars_per_document = 2500;
     std::size_t min_ranked_knowledge_score = 512;
+
+    // The full retrieved text remains available for direct answers; only the LLM prompt is shortened.
+    std::size_t max_prompt_knowledge_chars_per_document = 1200;
+    std::size_t max_expansion_knowledge_chars_per_document = 700;
+
+    std::size_t max_context_user_messages = 3;
+    std::size_t max_context_chars_per_user_message = 240;
+    std::size_t max_context_answer_excerpt_chars = 480;
+    std::size_t max_context_source_files = 2;
+
+    std::size_t max_contextual_retrieval_chars = 700;
+    std::size_t max_transform_answer_chars = 1200;
 };
 
 struct engine_answer_s {
@@ -96,13 +109,34 @@ private:
 
     [[nodiscard]] std::string build_system_prompt(std::span<const retrieved_knowledge_s> knowledge) const;
 
-    [[nodiscard]] std::vector<chat_message_s> build_request_messages(
-            const chat_history_entry_s &current_user_entry,
+    [[nodiscard]] std::string build_knowledge_base_block(
+            std::span<const retrieved_knowledge_s> knowledge,
+            std::size_t max_chars_per_document) const;
+
+    [[nodiscard]] std::string build_context_state_prompt() const;
+
+    [[nodiscard]] std::string build_previous_answer_transform_prompt(
+            std::string_view user_text,
             std::span<const retrieved_knowledge_s> knowledge) const;
 
-    [[nodiscard]] std::vector<std::string> make_context_source_filenames(
+    [[nodiscard]] std::string build_contextual_retrieval_query(std::string_view user_text) const;
+
+    [[nodiscard]] std::string previous_answer_for_transform() const;
+
+    [[nodiscard]] chat_context_state_s make_context_state(
+            bool follow_up,
+            bool remember_user_message,
+            std::string_view user_text,
+            std::string_view answer_body,
+            std::span<const std::string> source_filenames) const;
+
+    [[nodiscard]] std::vector<chat_message_s> build_request_messages(
+            const chat_history_entry_s &current_user_entry,
             std::span<const retrieved_knowledge_s> knowledge,
-            std::span<const std::uint64_t> relatives) const;
+            bool transform_previous_answer) const;
+
+    [[nodiscard]] std::vector<std::string> make_context_source_filenames(
+            std::span<const retrieved_knowledge_s> knowledge) const;
 
     [[nodiscard]] std::vector<std::string> make_source_filenames_from_relatives(
             std::span<const std::uint64_t> relatives) const;
@@ -127,6 +161,7 @@ private:
 
     std::vector<chat_history_entry_s> m_history;
     std::vector<std::uint64_t> m_last_topic_anchor_ids;
+    std::optional<chat_context_state_s> m_context_state;
 
     KnowledgeStorage m_knowledge;
 

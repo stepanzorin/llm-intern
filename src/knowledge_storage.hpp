@@ -4,10 +4,13 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <spdlog/logger.h>
@@ -45,10 +48,37 @@ enum class knowledge_match_e {
 
 [[nodiscard]] workplace_role_e workplace_role_from_string(std::string_view text);
 
-struct knowledge_document_s {
-    std::string filename = {};
-    std::string title = {};
+using knowledge_file_path_t = std::filesystem::path;
+using knowledge_tag_name_t = std::string;
+
+struct knowledge_tag_content_s {
+    // Original Markdown body of the H2 section. Used for direct answers.
     std::string content = {};
+
+    // Compact plain text prepared once during load(). Used in LLM prompts.
+    std::string model_content = {};
+};
+
+using knowledge_tags_t = std::map<knowledge_tag_name_t, knowledge_tag_content_s, std::less<>>;
+
+namespace detail {
+
+struct path_hash {
+    [[nodiscard]] std::size_t operator()(const std::filesystem::path &path) const noexcept {
+        return std::filesystem::hash_value(path);
+    }
+};
+
+} // namespace detail
+
+struct knowledge_document_s {
+    std::string title = {};
+
+    // All usable H2 sections except "Частые запросы пользователя".
+    knowledge_tags_t tags = {};
+
+    // std::map gives fast lookup by tag; this vector preserves file order.
+    std::vector<knowledge_tag_name_t> tag_order = {};
 
     std::vector<std::string> frequent_queries = {};
     std::vector<std::string> glossary_aliases = {};
@@ -61,6 +91,16 @@ struct knowledge_document_s {
 
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
+    bool glossary = false;
+};
+
+struct knowledge_glossary_entry_s {
+    knowledge_file_path_t file_path = {};
+    knowledge_tag_name_t tag_name = {};
+    std::string filename = {};
+    std::string title = {};
+    std::vector<std::string> aliases = {};
+    std::vector<std::string> normalized_aliases = {};
 };
 
 struct retrieved_knowledge_s {
@@ -104,9 +144,11 @@ public:
     [[nodiscard]] std::size_t size() const noexcept;
 
 private:
+    using document_map_t = std::unordered_map<knowledge_file_path_t, knowledge_document_s, detail::path_hash>;
+
     std::filesystem::path m_directory;
-    std::vector<knowledge_document_s> m_documents;
-    std::vector<knowledge_document_s> m_glossaries;
+    document_map_t m_documents;
+    std::vector<knowledge_glossary_entry_s> m_glossaries;
     std::shared_ptr<spdlog::logger> m_logger;
 
     [[nodiscard]] static bool document_matches_options(const knowledge_document_s &document,

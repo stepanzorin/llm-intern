@@ -1,9 +1,11 @@
 #include "llm/llama_client.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <exception>
 #include <format>
+#include <ranges>
 #include <stdexcept>
 #include <utility>
 
@@ -127,6 +129,18 @@ void validate_client_config(const llama_client_config_s &config) {
 
     if (config.max_tokens <= 0) {
         throw std::runtime_error{"LLM max_tokens must be greater than zero"};
+    }
+
+    if (config.context_window <= 0) {
+        throw std::runtime_error{"LLM context_window must be greater than zero"};
+    }
+
+    if (config.context_safety_margin < 0) {
+        throw std::runtime_error{"LLM context_safety_margin must not be negative"};
+    }
+
+    if (config.context_safety_margin >= config.context_window) {
+        throw std::runtime_error{"LLM context_safety_margin must be smaller than context_window"};
     }
 
     if (config.connection_timeout <= std::chrono::seconds::zero()) {
@@ -291,12 +305,57 @@ void validate_client_config(const llama_client_config_s &config) {
     return contains_any(text, phrases);
 }
 
+[[nodiscard]] int estimate_text_tokens(const std::string_view text) noexcept {
+    auto ascii_bytes = std::size_t{};
+    auto non_ascii_codepoints = std::size_t{};
+
+    for (auto index = std::size_t{}; index < text.size();) {
+        const auto first = static_cast<unsigned char>(text[index]);
+
+        if (first < 0x80) {
+            ++ascii_bytes;
+            ++index;
+            continue;
+        }
+
+        ++non_ascii_codepoints;
+
+        if ((first & 0xE0) == 0xC0 && index + 1 < text.size()) {
+            index += 2;
+        } else if ((first & 0xF0) == 0xE0 && index + 2 < text.size()) {
+            index += 3;
+        } else if ((first & 0xF8) == 0xF0 && index + 3 < text.size()) {
+            index += 4;
+        } else {
+            ++index;
+        }
+    }
+
+    const auto ascii_tokens = (ascii_bytes + 3) / 4;
+    const auto non_ascii_tokens = (non_ascii_codepoints + 1) / 2;
+
+    return static_cast<int>(ascii_tokens + non_ascii_tokens + 1);
+}
+
+[[nodiscard]] int estimate_prompt_tokens(const std::span<const chat_message_s> messages) noexcept {
+    auto result = 16;
+
+    for (const auto &message : messages) {
+        result += 8;
+        result += estimate_text_tokens(message.content);
+    }
+
+    return result;
+}
+
 [[nodiscard]] int clamp_response_tokens(const int desired_tokens, const int configured_max_tokens) noexcept {
     assert(configured_max_tokens > 0);
 
-    const auto safe_configured_max = std::max(configured_max_tokens, minimum_response_tokens);
+    if (configured_max_tokens < minimum_response_tokens) {
+        return configured_max_tokens;
+    }
 
-    return std::clamp(desired_tokens, minimum_response_tokens, safe_configured_max);
+    return std::clamp(desired_tokens, minimum_response_tokens, configured_max_tokens);
 }
 
 [[nodiscard]] int estimate_response_max_tokens(const std::span<const chat_message_s> messages,
@@ -363,6 +422,30 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
         throw std::runtime_error{"llama-server is not ready"};
     }
 
+    const auto desired_response_tokens = estimate_response_max_tokens(messages, m_config.max_tokens);
+    const auto estimated_prompt_tokens = estimate_prompt_tokens(messages);
+    const auto available_response_tokens =
+            m_config.context_window - m_config.context_safety_margin - estimated_prompt_tokens;
+
+    if (available_response_tokens <= 0) {
+        throw std::runtime_error{std::format(
+                "LLM prompt does not fit the configured context budget: estimated_prompt_tokens={}, "
+                "context_window={}, safety_margin={}",
+                estimated_prompt_tokens,
+                m_config.context_window,
+                m_config.context_safety_margin)};
+    }
+
+    const auto response_max_tokens = std::min(desired_response_tokens, available_response_tokens);
+
+    if (response_max_tokens < minimum_response_tokens) {
+        m_logger->warn("Only {} estimated tokens remain for the response; prompt={} context={} safety={}",
+                       response_max_tokens,
+                       estimated_prompt_tokens,
+                       m_config.context_window,
+                       m_config.context_safety_margin);
+    }
+
     auto session = m_server->start_generation();
 
     const auto endpoint = m_server->endpoint_config();
@@ -380,8 +463,6 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
     client.set_write_timeout(static_cast<time_t>(m_config.write_timeout.count()), 0);
 
     client.set_keep_alive(false);
-
-    const auto response_max_tokens = estimate_response_max_tokens(messages, m_config.max_tokens);
 
     const auto request_json = json{
             {"model", request_model_name(state)},
@@ -434,12 +515,14 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
                 }
             };
 
-    m_logger->debug("POST {}{} model='{}' slot={} max_tokens={}",
+    m_logger->debug("POST {}{} model='{}' slot={} prompt_tokens~{} max_tokens={} context={}",
                     m_server->url(),
                     endpoint.chat_completions_path,
                     request_model_name(state),
                     session->slot_id(),
-                    response_max_tokens);
+                    estimated_prompt_tokens,
+                    response_max_tokens,
+                    m_config.context_window);
 
     const auto response = client.send(request);
 

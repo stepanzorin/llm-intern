@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <format>
 #include <stdexcept>
 
@@ -15,25 +16,69 @@ namespace {
 
 using json = nlohmann::json;
 
-[[nodiscard]] json visible_message_to_json(const chat_visible_message_s &message) {
+[[nodiscard]] bool is_ascii_space(const unsigned char ch) noexcept {
+    return ch < 128 && std::isspace(ch) != 0;
+}
+
+[[nodiscard]] json visible_message_to_json(const chat_visible_message_s &message, const chat_role_e role) {
+    const auto model_source = message.model_content.empty() ? std::string_view{message.content}
+                                                            : std::string_view{message.model_content};
+
     return json{
             {"content", message.content},
             {"created_at", message.created_at},
-            {"model_content", message.model_content},
+            {"model_content", make_chat_model_content(model_source, role)},
             {"name", message.name},
     };
 }
 
 [[nodiscard]] chat_visible_message_s visible_message_from_json(const json &object,
-                                                               const std::string_view fallback_name) {
+                                                               const std::string_view fallback_name,
+                                                               const chat_role_e role) {
     auto message = chat_visible_message_s{};
 
     message.content = object.value("content", "");
     message.created_at = object.value("created_at", "");
-    message.model_content = object.value("model_content", message.content);
+
+    const auto stored_model_content = object.value("model_content", "");
+    const auto model_source = stored_model_content.empty() ? std::string_view{message.content}
+                                                            : std::string_view{stored_model_content};
+
+    message.model_content = make_chat_model_content(model_source, role);
     message.name = object.value("name", std::string{fallback_name});
 
     return message;
+}
+
+[[nodiscard]] json context_state_to_json(const chat_context_state_s &state) {
+    return json{
+            {"topic", state.topic},
+            {"recent_user_messages", state.recent_user_messages},
+            {"last_answer_excerpt", state.last_answer_excerpt},
+            {"source_files", state.source_files},
+    };
+}
+
+[[nodiscard]] chat_context_state_s context_state_from_json(const json &object) {
+    auto state = chat_context_state_s{};
+
+    state.topic = make_chat_model_content(object.value("topic", ""), chat_role_e::user);
+    state.last_answer_excerpt =
+            make_chat_model_content(object.value("last_answer_excerpt", ""), chat_role_e::assistant);
+
+    if (const auto it = object.find("recent_user_messages"); it != object.end() && it->is_array()) {
+        state.recent_user_messages = it->get<std::vector<std::string>>();
+
+        for (auto &message : state.recent_user_messages) {
+            message = make_chat_model_content(message, chat_role_e::user);
+        }
+    }
+
+    if (const auto it = object.find("source_files"); it != object.end() && it->is_array()) {
+        state.source_files = it->get<std::vector<std::string>>();
+    }
+
+    return state;
 }
 
 [[nodiscard]] json history_entry_to_json(const chat_history_entry_s &entry) {
@@ -46,11 +91,15 @@ using json = nlohmann::json;
     };
 
     if (entry.user.has_value()) {
-        object["user"] = visible_message_to_json(*entry.user);
+        object["user"] = visible_message_to_json(*entry.user, chat_role_e::user);
     }
 
     if (entry.assistant.has_value()) {
-        object["assistant"] = visible_message_to_json(*entry.assistant);
+        object["assistant"] = visible_message_to_json(*entry.assistant, chat_role_e::assistant);
+    }
+
+    if (entry.context_state.has_value()) {
+        object["context_state"] = context_state_to_json(*entry.context_state);
     }
 
     return object;
@@ -72,11 +121,15 @@ using json = nlohmann::json;
     }
 
     if (const auto it = object.find("user"); it != object.end() && it->is_object()) {
-        entry.user = visible_message_from_json(*it, "Я");
+        entry.user = visible_message_from_json(*it, "Я", chat_role_e::user);
     }
 
     if (const auto it = object.find("assistant"); it != object.end() && it->is_object()) {
-        entry.assistant = visible_message_from_json(*it, "AI-бот");
+        entry.assistant = visible_message_from_json(*it, "AI-бот", chat_role_e::assistant);
+    }
+
+    if (const auto it = object.find("context_state"); it != object.end() && it->is_object()) {
+        entry.context_state = context_state_from_json(*it);
     }
 
     if (!entry.user.has_value() && !entry.assistant.has_value()) {
@@ -102,7 +155,7 @@ using json = nlohmann::json;
     auto visible_message = chat_visible_message_s{
             .content = object.value("content", ""),
             .created_at = object.value("created_at", ""),
-            .model_content = object.value("content", ""),
+            .model_content = make_chat_model_content(object.value("content", ""), role),
             .name = object.value("name", role == chat_role_e::assistant ? "AI-бот" : "Я"),
     };
 
@@ -138,6 +191,100 @@ void fix_empty_or_duplicate_ids(std::vector<chat_history_entry_s> &entries) {
 }
 
 } // namespace
+
+std::string make_chat_model_content(const std::string_view text, const chat_role_e role) {
+    auto result = std::string{};
+    result.reserve(text.size());
+
+    const auto trim = [](std::string &line) {
+        auto begin = std::size_t{};
+
+        while (begin < line.size() && is_ascii_space(static_cast<unsigned char>(line[begin]))) {
+            ++begin;
+        }
+
+        auto end = line.size();
+
+        while (end > begin && is_ascii_space(static_cast<unsigned char>(line[end - 1]))) {
+            --end;
+        }
+
+        line = line.substr(begin, end - begin);
+    };
+
+    auto position = std::size_t{};
+
+    while (position <= text.size()) {
+        const auto line_end = text.find('\n', position);
+        auto line = std::string{text.substr(
+                position,
+                line_end == std::string_view::npos ? text.size() - position : line_end - position)};
+
+        trim(line);
+
+        if (role == chat_role_e::assistant) {
+            auto marker = line;
+            std::erase_if(marker, [](const char ch) noexcept { return ch == '*' || ch == '_' || ch == '`'; });
+            trim(marker);
+
+            if (marker.starts_with("Источники:") || marker.starts_with("Опирался на файлы:") ||
+                marker.starts_with("Sources:")) {
+                break;
+            }
+
+            if (line == "---") {
+                line.clear();
+            } else {
+                while (!line.empty() && line.front() == '#') {
+                    line.erase(line.begin());
+                }
+
+                trim(line);
+
+                if (!line.empty() && line.front() == '>') {
+                    line.erase(line.begin());
+                }
+
+                trim(line);
+
+                if (line.size() >= 2 &&
+                    (line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ "))) {
+                    line.erase(0, 2);
+                }
+
+                std::erase_if(line, [](const char ch) noexcept { return ch == '*' || ch == '`'; });
+            }
+        }
+
+        for (const auto ch : line) {
+            const auto byte = static_cast<unsigned char>(ch);
+
+            if (is_ascii_space(byte)) {
+                if (!result.empty() && result.back() != ' ') {
+                    result.push_back(' ');
+                }
+            } else if (byte >= 32 && byte != 127) {
+                result.push_back(ch);
+            }
+        }
+
+        if (!result.empty() && result.back() != ' ' && line_end != std::string_view::npos) {
+            result.push_back(' ');
+        }
+
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+
+        position = line_end + 1;
+    }
+
+    while (!result.empty() && result.back() == ' ') {
+        result.pop_back();
+    }
+
+    return result;
+}
 
 std::string_view to_string(const chat_role_e role) noexcept {
     switch (role) {
@@ -288,7 +435,7 @@ void save_chat_history(const std::filesystem::path &filename, const std::span<co
     }
 
     const auto output = json{
-            {"version", 3},
+            {"version", 4},
             {"messages", std::move(messages_array)},
     };
 

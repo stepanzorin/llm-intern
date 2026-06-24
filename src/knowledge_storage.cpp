@@ -876,11 +876,6 @@ struct frequent_query_score_s {
     return best;
 }
 
-[[nodiscard]] std::size_t count_exact_term_occurrences(const std::span<const std::string> terms,
-                                                       const std::string_view term) noexcept {
-    return static_cast<std::size_t>(std::ranges::count(terms, term));
-}
-
 [[nodiscard]] std::size_t count_recall_term_occurrences(const std::span<const std::string> terms,
                                                         const std::string_view query_term) {
     return static_cast<std::size_t>(std::ranges::count_if(terms, [&](const std::string &term) {
@@ -1170,54 +1165,104 @@ void remove_markdown_list_marker(std::string &line) {
     return result;
 }
 
-void flush_glossary_entry(std::vector<knowledge_document_s> &result,
-                          const std::string &relative_filename,
-                          std::vector<std::string> aliases,
-                          std::string body,
-                          const knowledge_source_e source,
-                          const workplace_role_e role) {
-    if (aliases.empty()) {
-        return;
+void remove_markdown_bullet_marker(std::string &line) {
+    util::trim(line);
+
+    if (line.size() >= 2 && (line.starts_with("- ") || line.starts_with("* "))) {
+        line.erase(0, 2);
+        util::trim(line);
     }
-
-    util::trim(body);
-
-    if (body.empty()) {
-        return;
-    }
-
-    auto title = aliases.front();
-    auto filename = std::format("{}#{}", relative_filename, title);
-
-    auto entry = knowledge_document_s{
-            .filename = std::move(filename),
-            .title = std::move(title),
-            .content = std::move(body),
-            .frequent_queries = {},
-            .glossary_aliases = std::move(aliases),
-            .normalized_filename = {},
-            .normalized_title = {},
-            .normalized_frequent_queries = {},
-            .normalized_glossary_aliases = {},
-            .source = source,
-            .role = role,
-    };
-
-    entry.normalized_filename = make_search_key(entry.filename);
-    entry.normalized_title = make_search_key(entry.title);
-    entry.normalized_glossary_aliases = normalize_search_keys(entry.glossary_aliases);
-
-    result.push_back(std::move(entry));
 }
 
-[[nodiscard]] std::vector<knowledge_document_s> extract_glossary_entries(const std::string_view content,
-                                                                         const std::string &relative_filename,
-                                                                         const knowledge_source_e source,
-                                                                         const workplace_role_e role) {
-    auto result = std::vector<knowledge_document_s>{};
-    auto current_aliases = std::vector<std::string>{};
+void remove_inline_markdown_markers(std::string &line) {
+    std::erase_if(line, [](const char ch) noexcept { return ch == '*' || ch == '_' || ch == '`'; });
+}
+
+[[nodiscard]] std::string make_model_content(const std::string_view markdown) {
+    auto result = std::string{};
+    auto position = std::size_t{};
+
+    while (position <= markdown.size()) {
+        const auto line_end = markdown.find('\n', position);
+        const auto line_view = markdown.substr(
+                position,
+                line_end == std::string_view::npos ? markdown.size() - position : line_end - position);
+
+        auto line = std::string{line_view};
+        util::trim(line);
+
+        if (!line.empty()) {
+            if (is_markdown_heading(line)) {
+                line = raw_markdown_heading_text(line);
+            } else {
+                remove_markdown_bullet_marker(line);
+            }
+
+            remove_inline_markdown_markers(line);
+            collapse_ascii_spaces(line);
+            util::trim(line);
+
+            if (!line.empty()) {
+                if (!result.empty()) {
+                    result.push_back(' ');
+                }
+
+                result += line;
+            }
+        }
+
+        if (line_end == std::string_view::npos) {
+            break;
+        }
+
+        position = line_end + 1;
+    }
+
+    return result;
+}
+
+struct parsed_knowledge_tags_s {
+    knowledge_tags_t tags = {};
+    std::vector<knowledge_tag_name_t> order = {};
+};
+
+void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, std::string body) {
+    util::trim(tag_name);
+    util::trim(body);
+
+    if (tag_name.empty() || body.empty() || make_search_key(tag_name) == "частые запросы пользователя") {
+        return;
+    }
+
+    auto tag = knowledge_tag_content_s{
+            .content = std::move(body),
+            .model_content = {},
+    };
+    tag.model_content = make_model_content(tag.content);
+
+    const auto [it, inserted] = result.tags.try_emplace(tag_name, std::move(tag));
+
+    if (inserted) {
+        result.order.push_back(std::move(tag_name));
+        return;
+    }
+
+    if (!it->second.content.empty()) {
+        it->second.content += "\n\n";
+    }
+    it->second.content += tag.content;
+
+    if (!it->second.model_content.empty() && !tag.model_content.empty()) {
+        it->second.model_content.push_back(' ');
+    }
+    it->second.model_content += tag.model_content;
+}
+
+[[nodiscard]] parsed_knowledge_tags_s extract_knowledge_tags(const std::string_view content) {
+    auto result = parsed_knowledge_tags_s{};
+    auto current_tag = std::string{};
     auto current_body = std::string{};
-    auto inside_entry = false;
+    auto inside_tag = false;
     auto position = std::size_t{};
 
     while (position <= content.size()) {
@@ -1227,17 +1272,14 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
                 line_end == std::string_view::npos ? content.size() - position : line_end - position);
 
         if (is_second_level_markdown_heading(line)) {
-            flush_glossary_entry(result,
-                                 relative_filename,
-                                 std::move(current_aliases),
-                                 std::move(current_body),
-                                 source,
-                                 role);
+            if (inside_tag) {
+                flush_knowledge_tag(result, std::move(current_tag), std::move(current_body));
+            }
 
-            current_aliases = extract_glossary_aliases(line);
+            current_tag = clean_glossary_term(raw_markdown_heading_text(line));
             current_body.clear();
-            inside_entry = true;
-        } else if (inside_entry) {
+            inside_tag = true;
+        } else if (inside_tag) {
             if (!current_body.empty()) {
                 current_body.push_back('\n');
             }
@@ -1252,7 +1294,9 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
         position = line_end + 1;
     }
 
-    flush_glossary_entry(result, relative_filename, std::move(current_aliases), std::move(current_body), source, role);
+    if (inside_tag) {
+        flush_knowledge_tag(result, std::move(current_tag), std::move(current_body));
+    }
 
     return result;
 }
@@ -1347,15 +1391,112 @@ void flush_glossary_entry(std::vector<knowledge_document_s> &result,
            match == knowledge_match_e::unordered_fuzzy_glossary_heading;
 }
 
-[[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_document_s &document,
+[[nodiscard]] const knowledge_tag_content_s *find_tag(const knowledge_document_s &document,
+                                                        const std::string_view tag_name) {
+    const auto exact = document.tags.find(tag_name);
+
+    if (exact != document.tags.end()) {
+        return &exact->second;
+    }
+
+    const auto normalized_tag_name = make_search_key(tag_name);
+    const auto it = std::ranges::find_if(document.tags, [&](const auto &item) {
+        return make_search_key(item.first) == normalized_tag_name;
+    });
+
+    return it == document.tags.end() ? nullptr : &it->second;
+}
+
+[[nodiscard]] const knowledge_tag_content_s *find_direct_instruction_tag(const knowledge_document_s &document) {
+    return find_tag(document, "Пошаговая инструкция что делать");
+}
+
+[[nodiscard]] std::string make_document_content(const knowledge_document_s &document, const bool for_model) {
+    auto result = std::string{};
+
+    for (const auto &tag_name : document.tag_order) {
+        const auto it = document.tags.find(tag_name);
+
+        if (it == document.tags.end()) {
+            assert(false);
+            continue;
+        }
+
+        const auto &content = for_model ? it->second.model_content : it->second.content;
+
+        if (content.empty()) {
+            continue;
+        }
+
+        if (!result.empty()) {
+            result += for_model ? "\n" : "\n\n";
+        }
+
+        if (for_model) {
+            result += std::format("Раздел «{}»: {}", tag_name, content);
+        } else {
+            result += std::format("## {}\n\n{}", tag_name, content);
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::string make_direct_document_content(const knowledge_document_s &document) {
+    if (const auto *instruction = find_direct_instruction_tag(document); instruction != nullptr) {
+        return instruction->content;
+    }
+
+    return make_document_content(document, false);
+}
+
+[[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_file_path_t &file_path,
+                                                            const knowledge_document_s &document,
                                                             const std::size_t score,
                                                             const std::size_t max_chars_per_document,
                                                             const knowledge_match_e match) {
+    auto content = is_direct_match(match) ? make_direct_document_content(document)
+                                          : make_document_content(document, true);
+
+    if (!is_direct_match(match)) {
+        content = take_prefix_utf8_safe(content, max_chars_per_document);
+    }
+
     return retrieved_knowledge_s{
-            .filename = document.filename,
+            .filename = file_path.generic_string(),
             .title = document.title,
-            .content = is_direct_match(match) ? document.content
-                                              : take_prefix_utf8_safe(document.content, max_chars_per_document),
+            .content = std::move(content),
+            .score = score,
+            .source = document.source,
+            .role = document.role,
+            .match = match,
+    };
+}
+
+[[nodiscard]] retrieved_knowledge_s make_retrieved_glossary_entry(
+        const knowledge_glossary_entry_s &entry,
+        const knowledge_document_s &document,
+        const std::size_t score,
+        const std::size_t max_chars_per_document,
+        const knowledge_match_e match) {
+    const auto tag_it = document.tags.find(entry.tag_name);
+
+    assert(tag_it != document.tags.end());
+
+    if (tag_it == document.tags.end()) {
+        std::terminate();
+    }
+
+    auto content = is_direct_match(match) ? tag_it->second.content : tag_it->second.model_content;
+
+    if (!is_direct_match(match)) {
+        content = take_prefix_utf8_safe(content, max_chars_per_document);
+    }
+
+    return retrieved_knowledge_s{
+            .filename = entry.filename,
+            .title = entry.title,
+            .content = std::move(content),
             .score = score,
             .source = document.source,
             .role = document.role,
@@ -1440,12 +1581,16 @@ void KnowledgeStorage::load() {
         return;
     }
 
+    auto total_tags = std::size_t{};
+    auto glossary_files = std::size_t{};
+
     for (const auto &entry : std::filesystem::recursive_directory_iterator{m_directory}) {
         if (!entry.is_regular_file() || !is_markdown_file(entry.path())) {
             continue;
         }
 
-        auto relative_filename = std::filesystem::relative(entry.path(), m_directory).generic_string();
+        auto relative_path = std::filesystem::relative(entry.path(), m_directory).lexically_normal();
+        auto relative_filename = relative_path.generic_string();
         const auto role = role_from_relative_filename(relative_filename);
 
         if (!role.has_value()) {
@@ -1453,49 +1598,81 @@ void KnowledgeStorage::load() {
             continue;
         }
 
-        auto content = util::read_text_file(entry.path());
         const auto source = detect_source_type(relative_filename);
+        const auto glossary = is_glossary_file(relative_filename);
+        auto content = util::read_text_file(entry.path());
+        auto parsed_tags = extract_knowledge_tags(content);
 
-        if (is_glossary_file(relative_filename)) {
-            auto entries = extract_glossary_entries(content, relative_filename, source, *role);
-
-            if (entries.empty()) {
-                m_logger->warn("Glossary file has no usable level-2 entries: {}", relative_filename);
-            }
-
-            m_glossaries.insert(m_glossaries.end(),
-                                std::make_move_iterator(entries.begin()),
-                                std::make_move_iterator(entries.end()));
+        if (parsed_tags.tags.empty()) {
+            m_logger->warn("Knowledge file has no usable level-2 sections: {}", relative_filename);
             continue;
         }
 
         auto title = extract_title(content, entry.path().filename().string());
-        auto frequent_queries = extract_frequent_queries(content);
+        auto frequent_queries = glossary ? std::vector<std::string>{} : extract_frequent_queries(content);
 
         auto document = knowledge_document_s{
-                .filename = std::move(relative_filename),
                 .title = std::move(title),
-                .content = std::move(content),
+                .tags = std::move(parsed_tags.tags),
+                .tag_order = std::move(parsed_tags.order),
                 .frequent_queries = std::move(frequent_queries),
                 .glossary_aliases = {},
-                .normalized_filename = {},
+                .normalized_filename = make_search_key(relative_filename),
                 .normalized_title = {},
                 .normalized_frequent_queries = {},
                 .normalized_glossary_aliases = {},
+                .frequent_query_terms = {},
                 .source = source,
                 .role = *role,
+                .glossary = glossary,
         };
 
-        document.normalized_filename = make_search_key(document.filename);
         document.normalized_title = make_search_key(document.title);
         document.normalized_frequent_queries = normalize_search_keys(document.frequent_queries);
         document.frequent_query_terms = make_frequent_query_terms(document.normalized_frequent_queries);
 
-        m_documents.push_back(std::move(document));
+        if (glossary) {
+            ++glossary_files;
+
+            auto seen_aliases = std::unordered_set<std::string>{};
+
+            for (const auto &tag_name : document.tag_order) {
+                auto aliases = extract_glossary_aliases(tag_name);
+                auto normalized_aliases = normalize_search_keys(aliases);
+
+                for (const auto &alias : aliases) {
+                    const auto normalized_alias = make_search_key(alias);
+
+                    if (!normalized_alias.empty() && seen_aliases.insert(normalized_alias).second) {
+                        document.glossary_aliases.push_back(alias);
+                    }
+                }
+
+                const auto title = aliases.empty() ? tag_name : aliases.front();
+
+                m_glossaries.push_back(knowledge_glossary_entry_s{
+                        .file_path = relative_path,
+                        .tag_name = tag_name,
+                        .filename = std::format("{}#{}", relative_filename, title),
+                        .title = title,
+                        .aliases = std::move(aliases),
+                        .normalized_aliases = std::move(normalized_aliases),
+                });
+            }
+
+            document.normalized_glossary_aliases = normalize_search_keys(document.glossary_aliases);
+        }
+
+        total_tags += document.tags.size();
+
+        const auto [_, inserted] = m_documents.emplace(std::move(relative_path), std::move(document));
+
+        if (!inserted) {
+            throw std::runtime_error{std::format("Duplicate knowledge file path '{}'", relative_filename)};
+        }
     }
 
-    std::ranges::sort(m_documents, {}, &knowledge_document_s::filename);
-    std::ranges::sort(m_glossaries, {}, &knowledge_document_s::filename);
+    std::ranges::sort(m_glossaries, {}, &knowledge_glossary_entry_s::filename);
 
     auto general_count = std::size_t{};
     auto barista_count = std::size_t{};
@@ -1504,8 +1681,8 @@ void KnowledgeStorage::load() {
     auto custom_count = std::size_t{};
     auto documents_without_frequent_queries = std::size_t{};
 
-    for (const auto &document : m_documents) {
-        if (document.normalized_frequent_queries.empty()) {
+    for (const auto &[_, document] : m_documents) {
+        if (!document.glossary && document.normalized_frequent_queries.empty()) {
             ++documents_without_frequent_queries;
         }
 
@@ -1521,17 +1698,19 @@ void KnowledgeStorage::load() {
         }
     }
 
-    m_logger->info("Loaded {} knowledge markdown files and {} glossary entries from '{}'",
+    m_logger->info("Loaded {} knowledge markdown files, {} cached H2 sections and {} glossary entries from '{}'",
                    m_documents.size(),
+                   total_tags,
                    m_glossaries.size(),
                    m_directory.string());
 
-    m_logger->info("Knowledge map: general={}, barista={}, seller={}, beauty_admin={}, custom={}",
+    m_logger->info("Knowledge map: general={}, barista={}, seller={}, beauty_admin={}, custom={}, glossary_files={}",
                    general_count,
                    barista_count,
                    seller_count,
                    beauty_admin_count,
-                   custom_count);
+                   custom_count,
+                   glossary_files);
 
     if (documents_without_frequent_queries != 0) {
         m_logger->warn("{} knowledge files have no 'Частые запросы пользователя' section",
@@ -1560,8 +1739,8 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
     auto frequent_query_results = std::vector<retrieved_knowledge_s>{};
     frequent_query_results.reserve(std::min(options.limit * 2, m_documents.size()));
 
-    for (const auto &document : m_documents) {
-        if (!document_matches_options(document, options)) {
+    for (const auto &[file_path, document] : m_documents) {
+        if (document.glossary || !document_matches_options(document, options)) {
             continue;
         }
 
@@ -1571,7 +1750,8 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        frequent_query_results.push_back(make_retrieved_document(document,
+        frequent_query_results.push_back(make_retrieved_document(file_path,
+                                                                 document,
                                                                  frequent_score.score,
                                                                  options.max_chars_per_document,
                                                                  frequent_score.match));
@@ -1594,8 +1774,8 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
     auto ranked_context_query_results = std::vector<retrieved_knowledge_s>{};
     ranked_context_query_results.reserve(std::min(options.limit * 2, m_documents.size()));
 
-    for (const auto &document : m_documents) {
-        if (!document_matches_options(document, options)) {
+    for (const auto &[file_path, document] : m_documents) {
+        if (document.glossary || !document_matches_options(document, options)) {
             continue;
         }
 
@@ -1605,7 +1785,7 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             if (score != 0) {
                 m_logger->debug(
                         "Knowledge candidate rejected by ranked context query threshold: {} score={} min_score={}",
-                        document.filename,
+                        file_path.generic_string(),
                         score,
                         ranked_context_query_min_score);
             }
@@ -1613,8 +1793,11 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        ranked_context_query_results.push_back(
-                make_retrieved_document(document, score, options.max_chars_per_document, knowledge_match_e::ranked));
+        ranked_context_query_results.push_back(make_retrieved_document(file_path,
+                                                                       document,
+                                                                       score,
+                                                                       options.max_chars_per_document,
+                                                                       knowledge_match_e::ranked));
     }
 
     if (!ranked_context_query_results.empty()) {
@@ -1643,8 +1826,8 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
     auto ranked_results = std::vector<retrieved_knowledge_s>{};
     ranked_results.reserve(std::min(options.limit, m_documents.size()));
 
-    for (const auto &document : m_documents) {
-        if (!document_matches_options(document, options)) {
+    for (const auto &[file_path, document] : m_documents) {
+        if (document.glossary || !document_matches_options(document, options)) {
             continue;
         }
 
@@ -1653,7 +1836,7 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         if (score < options.min_ranked_score) {
             if (score != 0) {
                 m_logger->debug("Knowledge candidate rejected by fallback score threshold: {} score={} min_score={}",
-                                document.filename,
+                                file_path.generic_string(),
                                 score,
                                 options.min_ranked_score);
             }
@@ -1661,8 +1844,11 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        ranked_results.push_back(
-                make_retrieved_document(document, score, options.max_chars_per_document, knowledge_match_e::ranked));
+        ranked_results.push_back(make_retrieved_document(file_path,
+                                                         document,
+                                                         score,
+                                                         options.max_chars_per_document,
+                                                         knowledge_match_e::ranked));
     }
 
     std::ranges::sort(ranked_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
@@ -1705,7 +1891,16 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
     results.reserve(std::min(options.limit, m_glossaries.size()));
 
     for (const auto &entry : m_glossaries) {
-        if (!document_matches_options(entry, options)) {
+        const auto document_it = m_documents.find(entry.file_path);
+
+        if (document_it == m_documents.end()) {
+            assert(false);
+            continue;
+        }
+
+        const auto &document = document_it->second;
+
+        if (!document_matches_options(document, options)) {
             continue;
         }
 
@@ -1726,10 +1921,10 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
             }
         };
 
-        if (entry.normalized_glossary_aliases.empty()) {
-            score_alias(entry.normalized_title);
+        if (entry.normalized_aliases.empty()) {
+            score_alias(make_search_key(entry.title));
         } else {
-            for (const auto &alias : entry.normalized_glossary_aliases) {
+            for (const auto &alias : entry.normalized_aliases) {
                 score_alias(alias);
             }
         }
@@ -1755,7 +1950,11 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
             case knowledge_match_e::ranked: continue;
         }
 
-        results.push_back(make_retrieved_document(entry, score.score, options.max_chars_per_document, match));
+        results.push_back(make_retrieved_glossary_entry(entry,
+                                                        document,
+                                                        score.score,
+                                                        options.max_chars_per_document,
+                                                        match));
     }
 
     std::ranges::sort(results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
@@ -1776,7 +1975,7 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
 std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
         const std::span<const std::string> filenames,
         const knowledge_retrieve_options_s &options) const {
-    if ((m_documents.empty() && m_glossaries.empty()) || filenames.empty() || options.limit == 0) {
+    if (m_documents.empty() || filenames.empty() || options.limit == 0) {
         return {};
     }
 
@@ -1790,32 +1989,45 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
             continue;
         }
 
-        const auto find_in = [&filename](const std::vector<knowledge_document_s> &documents) {
-            return std::ranges::find_if(documents, [&filename](const knowledge_document_s &document) noexcept {
-                return document.filename == filename;
-            });
-        };
+        if (const auto glossary_it = std::ranges::find(m_glossaries, filename, &knowledge_glossary_entry_s::filename);
+            glossary_it != m_glossaries.end()) {
+            const auto document_it = m_documents.find(glossary_it->file_path);
 
-        auto document_it = find_in(m_documents);
-        const auto *document = document_it == m_documents.end() ? nullptr : &*document_it;
+            if (document_it == m_documents.end()) {
+                m_logger->debug("Contextual glossary source from history was not found: {}", filename);
+                continue;
+            }
 
-        if (document == nullptr) {
-            auto glossary_it = find_in(m_glossaries);
-            document = glossary_it == m_glossaries.end() ? nullptr : &*glossary_it;
+            if (!document_matches_options(document_it->second, options)) {
+                m_logger->debug("Contextual glossary source from history was rejected by options: {}", filename);
+                continue;
+            }
+
+            result.push_back(make_retrieved_glossary_entry(*glossary_it,
+                                                           document_it->second,
+                                                           1,
+                                                           options.max_chars_per_document,
+                                                           knowledge_match_e::ranked));
+        } else {
+            const auto file_path = std::filesystem::path{filename, std::filesystem::path::generic_format}.lexically_normal();
+            const auto document_it = m_documents.find(file_path);
+
+            if (document_it == m_documents.end()) {
+                m_logger->debug("Contextual knowledge source from history was not found: {}", filename);
+                continue;
+            }
+
+            if (!document_matches_options(document_it->second, options)) {
+                m_logger->debug("Contextual knowledge source from history was rejected by options: {}", filename);
+                continue;
+            }
+
+            result.push_back(make_retrieved_document(document_it->first,
+                                                     document_it->second,
+                                                     1,
+                                                     options.max_chars_per_document,
+                                                     knowledge_match_e::ranked));
         }
-
-        if (document == nullptr) {
-            m_logger->debug("Contextual knowledge source from history was not found: {}", filename);
-            continue;
-        }
-
-        if (!document_matches_options(*document, options)) {
-            m_logger->debug("Contextual knowledge source from history was rejected by options: {}", filename);
-            continue;
-        }
-
-        result.push_back(
-                make_retrieved_document(*document, 1, options.max_chars_per_document, knowledge_match_e::ranked));
 
         if (result.size() >= options.limit) {
             break;
@@ -1825,9 +2037,9 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
     return result;
 }
 
-bool KnowledgeStorage::empty() const noexcept { return m_documents.empty() && m_glossaries.empty(); }
+bool KnowledgeStorage::empty() const noexcept { return m_documents.empty(); }
 
-std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size() + m_glossaries.size(); }
+std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size(); }
 
 bool KnowledgeStorage::document_matches_options(const knowledge_document_s &document,
                                                 const knowledge_retrieve_options_s &options) noexcept {

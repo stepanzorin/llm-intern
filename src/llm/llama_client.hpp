@@ -28,6 +28,10 @@ struct llama_client_config_s {
 
     std::int32_t max_tokens = 512;
 
+    // Logical prompt + response budget. Keep it not greater than llama-server n_ctx.
+    std::int32_t context_window = 2048;
+    std::int32_t context_safety_margin = 128;
+
     bool cache_prompt = true;
 
     std::chrono::seconds connection_timeout = std::chrono::seconds{10};
