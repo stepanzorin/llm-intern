@@ -128,7 +128,8 @@ private:
             bool remember_user_message,
             std::string_view user_text,
             std::string_view answer_body,
-            std::span<const std::string> source_filenames) const;
+            std::span<const std::string> source_filenames,
+            std::span<const retrieved_knowledge_s> knowledge) const;
 
     [[nodiscard]] std::vector<chat_message_s> build_request_messages(
             const chat_history_entry_s &current_user_entry,

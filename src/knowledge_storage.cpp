@@ -28,6 +28,8 @@ constexpr auto unordered_fuzzy_glossary_heading_score = std::size_t{8600};
 constexpr auto direct_glossary_heading_min_score = std::size_t{7600};
 constexpr auto ranked_context_query_min_score = std::size_t{4200};
 constexpr auto ranked_context_query_secondary_gap = std::size_t{900};
+constexpr auto tag_heading_min_score = std::size_t{5600};
+constexpr auto compound_query_tag_focus_bonus = std::size_t{1800};
 
 [[nodiscard]] bool is_markdown_file(const std::filesystem::path &filename) {
     auto extension = filename.extension().string();
@@ -548,6 +550,51 @@ void collapse_ascii_spaces(std::string &text) {
     return terms;
 }
 
+[[nodiscard]] bool is_tag_query_noise_term(const std::string_view term) noexcept {
+    /*
+     * Unlike document retrieval, section selection must preserve semantic
+     * intent words such as "проблемы", "риски", "важно" and "учесть".
+     * Only generic question scaffolding is removed here.
+     */
+    constexpr auto noise_terms = std::array{
+            std::string_view{"yclients"},   std::string_view{"что"},       std::string_view{"чем"},
+            std::string_view{"че"},         std::string_view{"чё"},        std::string_view{"как"},
+            std::string_view{"каким"},      std::string_view{"образом"},  std::string_view{"где"},
+            std::string_view{"когда"},      std::string_view{"куда"},     std::string_view{"зачем"},
+            std::string_view{"почему"},     std::string_view{"кто"},      std::string_view{"кого"},
+            std::string_view{"кому"},       std::string_view{"какой"},    std::string_view{"какая"},
+            std::string_view{"какое"},      std::string_view{"какие"},    std::string_view{"для"},
+            std::string_view{"про"},        std::string_view{"при"},      std::string_view{"без"},
+            std::string_view{"или"},        std::string_view{"если"},     std::string_view{"чтобы"},
+            std::string_view{"надо"},       std::string_view{"нужно"},    std::string_view{"нужен"},
+            std::string_view{"нужна"},      std::string_view{"нужны"},    std::string_view{"можно"},
+            std::string_view{"могут"},      std::string_view{"может"},    std::string_view{"возникнуть"},
+            std::string_view{"возникнут"},  std::string_view{"возникают"}, std::string_view{"появиться"},
+            std::string_view{"появятся"},   std::string_view{"быть"},     std::string_view{"будет"},
+            std::string_view{"это"},        std::string_view{"такое"},    std::string_view{"подскажи"},
+            std::string_view{"пожалуйста"}, std::string_view{"расскажи"}, std::string_view{"объясни"},
+    };
+
+    return std::ranges::find(noise_terms, term) != noise_terms.end();
+}
+
+[[nodiscard]] std::vector<std::string> make_tag_query_terms(const std::span<const std::string> terms) {
+    auto result = std::vector<std::string>{};
+    result.reserve(terms.size());
+
+    for (const auto &term : terms) {
+        if (!is_tag_query_noise_term(term)) {
+            result.push_back(term);
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::vector<std::string> make_tag_heading_terms(const std::string_view tag_name) {
+    return make_search_terms(tag_name);
+}
+
 [[nodiscard]] bool contains_term(const std::span<const std::string> terms, const std::string_view term) noexcept {
     return std::ranges::find(terms, term) != terms.end();
 }
@@ -932,6 +979,291 @@ struct frequent_query_score_s {
     return result;
 }
 
+enum class knowledge_tag_priority_e : std::size_t {
+    instruction = 0,
+    problems = 1,
+    critical = 2,
+    important = 3,
+    consider = 4,
+    other = 5,
+};
+
+[[nodiscard]] bool tag_name_contains_any(const knowledge_tag_content_s &tag,
+                                         const std::span<const std::string_view> terms) {
+    return std::ranges::any_of(terms, [&](const std::string_view term) {
+        return contains_term_by_recall(tag.search_terms, term);
+    });
+}
+
+[[nodiscard]] knowledge_tag_priority_e classify_knowledge_tag(const knowledge_tag_content_s &tag) {
+    constexpr auto instruction_terms = std::array{
+            std::string_view{"инструкция"},
+            std::string_view{"пошаговая"},
+            std::string_view{"шаги"},
+            std::string_view{"порядок"},
+    };
+
+    if (tag_name_contains_any(tag, std::span{instruction_terms})) {
+        return knowledge_tag_priority_e::instruction;
+    }
+
+    constexpr auto problem_terms = std::array{
+            std::string_view{"проблема"},
+            std::string_view{"проблемы"},
+    };
+
+    if (tag_name_contains_any(tag, std::span{problem_terms})) {
+        return knowledge_tag_priority_e::problems;
+    }
+
+    constexpr auto critical_terms = std::array{
+            std::string_view{"критически"},
+            std::string_view{"критичное"},
+            std::string_view{"критично"},
+    };
+
+    if (tag_name_contains_any(tag, std::span{critical_terms})) {
+        return knowledge_tag_priority_e::critical;
+    }
+
+    constexpr auto important_terms = std::array{
+            std::string_view{"важно"},
+            std::string_view{"важный"},
+            std::string_view{"важная"},
+    };
+
+    if (tag_name_contains_any(tag, std::span{important_terms})) {
+        return knowledge_tag_priority_e::important;
+    }
+
+    constexpr auto consider_terms = std::array{
+            std::string_view{"учесть"},
+            std::string_view{"учитывать"},
+            std::string_view{"внимание"},
+    };
+
+    if (tag_name_contains_any(tag, std::span{consider_terms})) {
+        return knowledge_tag_priority_e::consider;
+    }
+
+    return knowledge_tag_priority_e::other;
+}
+
+[[nodiscard]] bool query_contains_any_by_recall(const std::span<const std::string> query_terms,
+                                                const std::span<const std::string_view> expected_terms) {
+    return std::ranges::any_of(expected_terms, [&](const std::string_view expected_term) {
+        return contains_term_by_recall(query_terms, expected_term);
+    });
+}
+
+[[nodiscard]] bool has_instruction_tag_intent(const std::string_view normalized_query,
+                                              const std::span<const std::string> query_terms) {
+    constexpr auto prefixes = std::array{
+            std::string_view{"как "},
+            std::string_view{"а как "},
+            std::string_view{"каким образом "},
+            std::string_view{"а каким образом "},
+            std::string_view{"что делать"},
+            std::string_view{"а что делать"},
+    };
+
+    if (std::ranges::any_of(prefixes,
+                            [&](const std::string_view prefix) { return normalized_query.starts_with(prefix); })) {
+        return true;
+    }
+
+    constexpr auto terms = std::array{
+            std::string_view{"инструкция"},
+            std::string_view{"пошагово"},
+            std::string_view{"шаги"},
+            std::string_view{"порядок"},
+    };
+
+    return query_contains_any_by_recall(query_terms, std::span{terms});
+}
+
+[[nodiscard]] std::size_t preferred_tag_intent_score(const knowledge_tag_priority_e priority,
+                                                     const std::string_view normalized_query,
+                                                     const std::span<const std::string> query_terms) {
+    switch (priority) {
+        case knowledge_tag_priority_e::instruction:
+            return has_instruction_tag_intent(normalized_query, query_terms) ? std::size_t{7000} : std::size_t{};
+
+        case knowledge_tag_priority_e::problems: {
+            constexpr auto terms = std::array{
+                    std::string_view{"проблема"},
+                    std::string_view{"ошибка"},
+                    std::string_view{"риск"},
+                    std::string_view{"сложность"},
+                    std::string_view{"затруднение"},
+            };
+
+            return query_contains_any_by_recall(query_terms, std::span{terms}) ? std::size_t{9000} : std::size_t{};
+        }
+
+        case knowledge_tag_priority_e::critical: {
+            constexpr auto terms = std::array{
+                    std::string_view{"критически"},
+                    std::string_view{"критично"},
+                    std::string_view{"критичный"},
+            };
+
+            return query_contains_any_by_recall(query_terms, std::span{terms}) ? std::size_t{9000} : std::size_t{};
+        }
+
+        case knowledge_tag_priority_e::important: {
+            constexpr auto terms = std::array{
+                    std::string_view{"важно"},
+                    std::string_view{"важный"},
+                    std::string_view{"обязательно"},
+            };
+
+            return query_contains_any_by_recall(query_terms, std::span{terms}) ? std::size_t{8800} : std::size_t{};
+        }
+
+        case knowledge_tag_priority_e::consider: {
+            constexpr auto terms = std::array{
+                    std::string_view{"учесть"},
+                    std::string_view{"учитывать"},
+                    std::string_view{"внимание"},
+            };
+
+            return query_contains_any_by_recall(query_terms, std::span{terms}) ? std::size_t{8600} : std::size_t{};
+        }
+
+        case knowledge_tag_priority_e::other: return {};
+    }
+
+    return {};
+}
+
+[[nodiscard]] bool is_section_intent_term(const std::string_view term) {
+    constexpr auto terms = std::array{
+            std::string_view{"проблема"},      std::string_view{"ошибка"},       std::string_view{"риск"},
+            std::string_view{"нюанс"},         std::string_view{"ограничение"},  std::string_view{"исключение"},
+            std::string_view{"последствие"},   std::string_view{"причина"},      std::string_view{"решение"},
+            std::string_view{"пример"},        std::string_view{"проверка"},     std::string_view{"предупреждение"},
+            std::string_view{"требование"},    std::string_view{"важно"},       std::string_view{"критично"},
+            std::string_view{"учесть"},        std::string_view{"внимание"},    std::string_view{"документы"},
+    };
+
+    return std::ranges::any_of(terms,
+                               [&](const std::string_view expected) { return recall_match_terms(term, expected); });
+}
+
+[[nodiscard]] std::size_t score_tag_heading(const knowledge_tag_content_s &tag,
+                                            const std::span<const std::string> query_terms) {
+    if (tag.search_terms.empty() || query_terms.empty()) {
+        return {};
+    }
+
+    const auto recall_overlap = count_recall_term_overlap(tag.search_terms, query_terms);
+
+    if (recall_overlap == 0) {
+        return {};
+    }
+
+    const auto exact_overlap = count_exact_term_overlap(tag.search_terms, query_terms);
+
+    auto score = recall_overlap * 6200 / tag.search_terms.size();
+    score += recall_overlap * 2200 / query_terms.size();
+    score += exact_overlap * 300;
+
+    if (contains_all_terms_by_recall(tag.search_terms, query_terms)) {
+        score += 900;
+    }
+
+    const auto section_intent_match = std::ranges::any_of(tag.search_terms, [&](const std::string &tag_term) {
+        return is_section_intent_term(tag_term) && contains_term_by_recall(query_terms, tag_term);
+    });
+
+    if (section_intent_match) {
+        score += 1800;
+    }
+
+    if (tag.search_terms.size() == 1 && query_terms.size() > 2 &&
+        !is_section_intent_term(tag.search_terms.front())) {
+        score = std::min(score, tag_heading_min_score - 1);
+    }
+
+    return std::min(score, exact_frequent_query_score);
+}
+
+[[nodiscard]] std::vector<std::string> make_tag_specific_query_terms(
+        const knowledge_tag_content_s &tag,
+        const std::span<const std::string> query_terms) {
+    auto result = std::vector<std::string>{};
+    result.reserve(query_terms.size());
+
+    for (const auto &query_term : query_terms) {
+        if (contains_term_by_recall(tag.search_terms, query_term)) {
+            result.push_back(query_term);
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] bool can_score_tag_specific_query(const knowledge_tag_content_s &tag,
+                                                const std::span<const std::string> query_terms) noexcept {
+    if (query_terms.size() >= 2) {
+        return true;
+    }
+
+    return query_terms.size() == 1 && tag.search_terms.size() == 1;
+}
+
+struct selected_knowledge_tag_s {
+    const knowledge_tag_name_t *name = nullptr;
+    const knowledge_tag_content_s *tag = nullptr;
+    std::vector<std::string> matched_query_terms = {};
+    std::size_t score = {};
+    knowledge_tag_priority_e priority = knowledge_tag_priority_e::other;
+};
+
+void consider_knowledge_tag(selected_knowledge_tag_s &best,
+                            const knowledge_tag_name_t &tag_name,
+                            const knowledge_tag_content_s &tag,
+                            const std::string_view normalized_query,
+                            const std::span<const std::string> query_terms) {
+    const auto priority = classify_knowledge_tag(tag);
+    auto matched_query_terms = make_tag_specific_query_terms(tag, query_terms);
+
+    const auto full_query_lexical_score = tag.normalized_name == normalized_query
+                                                  ? exact_frequent_query_score
+                                                  : score_tag_heading(tag, query_terms);
+    auto focused_query_lexical_score = can_score_tag_specific_query(tag, matched_query_terms)
+                                               ? score_tag_heading(tag, matched_query_terms)
+                                               : std::size_t{};
+
+    if (priority == knowledge_tag_priority_e::other && matched_query_terms.size() >= 2 &&
+        matched_query_terms.size() < query_terms.size()) {
+        focused_query_lexical_score = std::min(exact_frequent_query_score,
+                                               focused_query_lexical_score + compound_query_tag_focus_bonus);
+    }
+
+    const auto lexical_score = std::max(full_query_lexical_score, focused_query_lexical_score);
+    const auto intent_score = preferred_tag_intent_score(priority, normalized_query, query_terms);
+    const auto score = std::max(lexical_score, intent_score);
+
+    if (score < tag_heading_min_score) {
+        return;
+    }
+
+    if (best.tag != nullptr &&
+        (score < best.score || (score == best.score && priority >= best.priority))) {
+        return;
+    }
+
+    best = {
+            .name = &tag_name,
+            .tag = &tag,
+            .matched_query_terms = std::move(matched_query_terms),
+            .score = score,
+            .priority = priority,
+    };
+}
+
 [[nodiscard]] std::string extract_title(const std::string_view content, const std::string &fallback) {
     auto position = std::size_t{};
 
@@ -1237,6 +1569,8 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
     auto tag = knowledge_tag_content_s{
             .content = std::move(body),
             .model_content = {},
+            .normalized_name = make_search_key(tag_name),
+            .search_terms = make_tag_heading_terms(tag_name),
     };
     tag.model_content = make_model_content(tag.content);
 
@@ -1391,24 +1725,112 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
            match == knowledge_match_e::unordered_fuzzy_glossary_heading;
 }
 
-[[nodiscard]] const knowledge_tag_content_s *find_tag(const knowledge_document_s &document,
-                                                        const std::string_view tag_name) {
-    const auto exact = document.tags.find(tag_name);
+[[nodiscard]] selected_knowledge_tag_s find_default_knowledge_tag(const knowledge_document_s &document) {
+    constexpr auto priorities = std::array{
+            knowledge_tag_priority_e::instruction,
+            knowledge_tag_priority_e::problems,
+            knowledge_tag_priority_e::critical,
+            knowledge_tag_priority_e::important,
+            knowledge_tag_priority_e::consider,
+    };
 
-    if (exact != document.tags.end()) {
-        return &exact->second;
+    for (const auto priority : priorities) {
+        for (const auto &tag_name : document.tag_order) {
+            const auto it = document.tags.find(tag_name);
+
+            if (it == document.tags.end()) {
+                assert(false);
+                continue;
+            }
+
+            if (classify_knowledge_tag(it->second) == priority) {
+                return {
+                        .name = &it->first,
+                        .tag = &it->second,
+                        .score = {},
+                        .priority = priority,
+                };
+            }
+        }
     }
 
-    const auto normalized_tag_name = make_search_key(tag_name);
-    const auto it = std::ranges::find_if(document.tags, [&](const auto &item) {
-        return make_search_key(item.first) == normalized_tag_name;
-    });
+    if (document.tag_order.empty()) {
+        return {};
+    }
 
-    return it == document.tags.end() ? nullptr : &it->second;
+    const auto it = document.tags.find(document.tag_order.front());
+
+    assert(it != document.tags.end());
+
+    if (it == document.tags.end()) {
+        std::terminate();
+    }
+
+    return {
+            .name = &it->first,
+            .tag = &it->second,
+            .score = {},
+            .priority = knowledge_tag_priority_e::other,
+    };
 }
 
-[[nodiscard]] const knowledge_tag_content_s *find_direct_instruction_tag(const knowledge_document_s &document) {
-    return find_tag(document, "Пошаговая инструкция что делать");
+[[nodiscard]] selected_knowledge_tag_s select_knowledge_tag(
+        const knowledge_document_s &document,
+        const std::string_view normalized_query,
+        const std::span<const std::string> query_terms,
+        const bool use_default_fallback) {
+    auto best = selected_knowledge_tag_s{};
+
+    constexpr auto preferred_priorities = std::array{
+            knowledge_tag_priority_e::instruction,
+            knowledge_tag_priority_e::problems,
+            knowledge_tag_priority_e::critical,
+            knowledge_tag_priority_e::important,
+            knowledge_tag_priority_e::consider,
+    };
+
+    /*
+     * Preferred built-in sections are evaluated first. Unknown/custom H2
+     * headings are evaluated afterwards and may still win with a stronger
+     * lexical match to the current query.
+     */
+    for (const auto priority : preferred_priorities) {
+        for (const auto &tag_name : document.tag_order) {
+            const auto it = document.tags.find(tag_name);
+
+            if (it == document.tags.end()) {
+                assert(false);
+                continue;
+            }
+
+            if (classify_knowledge_tag(it->second) != priority) {
+                continue;
+            }
+
+            consider_knowledge_tag(best, it->first, it->second, normalized_query, query_terms);
+        }
+    }
+
+    for (const auto &tag_name : document.tag_order) {
+        const auto it = document.tags.find(tag_name);
+
+        if (it == document.tags.end()) {
+            assert(false);
+            continue;
+        }
+
+        if (classify_knowledge_tag(it->second) != knowledge_tag_priority_e::other) {
+            continue;
+        }
+
+        consider_knowledge_tag(best, it->first, it->second, normalized_query, query_terms);
+    }
+
+    if (best.tag != nullptr || !use_default_fallback) {
+        return best;
+    }
+
+    return find_default_knowledge_tag(document);
 }
 
 [[nodiscard]] std::string make_document_content(const knowledge_document_s &document, const bool for_model) {
@@ -1442,21 +1864,72 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
     return result;
 }
 
-[[nodiscard]] std::string make_direct_document_content(const knowledge_document_s &document) {
-    if (const auto *instruction = find_direct_instruction_tag(document); instruction != nullptr) {
-        return instruction->content;
+struct knowledge_query_parts_s {
+    std::string document = {};
+    std::string section = {};
+};
+
+[[nodiscard]] knowledge_query_parts_s make_knowledge_query_parts(
+        const std::string_view normalized_query,
+        const selected_knowledge_tag_s &selected_tag) {
+    if (selected_tag.tag == nullptr || selected_tag.score < tag_heading_min_score ||
+        selected_tag.matched_query_terms.empty()) {
+        return {};
     }
 
-    return make_document_content(document, false);
+    auto document_terms = make_tag_query_terms(make_search_terms(normalized_query));
+
+    std::erase_if(document_terms, [&](const std::string &document_term) {
+        return contains_term_by_recall(selected_tag.matched_query_terms, document_term);
+    });
+
+    if (document_terms.empty()) {
+        return {};
+    }
+
+    auto result = knowledge_query_parts_s{
+            .document = join_search_terms(document_terms),
+            .section = join_search_terms(selected_tag.matched_query_terms),
+    };
+
+    if (result.document.empty() || result.section.empty() || result.document == result.section) {
+        return {};
+    }
+
+    return result;
 }
 
 [[nodiscard]] retrieved_knowledge_s make_retrieved_document(const knowledge_file_path_t &file_path,
                                                             const knowledge_document_s &document,
                                                             const std::size_t score,
                                                             const std::size_t max_chars_per_document,
-                                                            const knowledge_match_e match) {
-    auto content = is_direct_match(match) ? make_direct_document_content(document)
-                                          : make_document_content(document, true);
+                                                            const knowledge_match_e match,
+                                                            const std::string_view normalized_query,
+                                                            const std::span<const std::string> tag_query_terms,
+                                                            const bool use_default_tag_fallback) {
+    const auto selected_tag = select_knowledge_tag(document,
+                                                   normalized_query,
+                                                   tag_query_terms,
+                                                   use_default_tag_fallback);
+
+    auto tag_name = std::string{};
+    auto content = std::string{};
+    auto direct_content = std::string{};
+    const auto tag_matched_query = selected_tag.tag != nullptr && selected_tag.score >= tag_heading_min_score;
+    const auto query_parts = make_knowledge_query_parts(normalized_query, selected_tag);
+
+    if (selected_tag.tag != nullptr) {
+        assert(selected_tag.name != nullptr);
+
+        tag_name = *selected_tag.name;
+        content = is_direct_match(match) ? selected_tag.tag->content : selected_tag.tag->model_content;
+
+        if (tag_matched_query) {
+            direct_content = selected_tag.tag->content;
+        }
+    } else {
+        content = make_document_content(document, is_direct_match(match) ? false : true);
+    }
 
     if (!is_direct_match(match)) {
         content = take_prefix_utf8_safe(content, max_chars_per_document);
@@ -1465,12 +1938,63 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
     return retrieved_knowledge_s{
             .filename = file_path.generic_string(),
             .title = document.title,
+            .tag_name = std::move(tag_name),
             .content = std::move(content),
+            .direct_content = std::move(direct_content),
+            .document_query = query_parts.document,
+            .section_query = query_parts.section,
             .score = score,
             .source = document.source,
             .role = document.role,
             .match = match,
+            .tag_matched_query = tag_matched_query,
     };
+}
+
+struct knowledge_document_candidate_s {
+    knowledge_file_path_t file_path = {};
+    const knowledge_document_s *document = nullptr;
+    std::size_t score = {};
+    knowledge_match_e match = knowledge_match_e::none;
+};
+
+void sort_document_candidates(std::vector<knowledge_document_candidate_s> &candidates) {
+    std::ranges::sort(candidates, [](const knowledge_document_candidate_s &lhs,
+                                    const knowledge_document_candidate_s &rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+
+        return lhs.file_path.generic_string() < rhs.file_path.generic_string();
+    });
+}
+
+[[nodiscard]] std::vector<retrieved_knowledge_s> materialize_document_candidates(
+        const std::span<const knowledge_document_candidate_s> candidates,
+        const std::size_t max_chars_per_document,
+        const std::string_view normalized_query,
+        const std::span<const std::string> tag_query_terms) {
+    auto result = std::vector<retrieved_knowledge_s>{};
+    result.reserve(candidates.size());
+
+    for (const auto &candidate : candidates) {
+        assert(candidate.document != nullptr);
+
+        if (candidate.document == nullptr) {
+            std::terminate();
+        }
+
+        result.push_back(make_retrieved_document(candidate.file_path,
+                                                 *candidate.document,
+                                                 candidate.score,
+                                                 max_chars_per_document,
+                                                 candidate.match,
+                                                 normalized_query,
+                                                 tag_query_terms,
+                                                 true));
+    }
+
+    return result;
 }
 
 [[nodiscard]] retrieved_knowledge_s make_retrieved_glossary_entry(
@@ -1496,6 +2020,7 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
     return retrieved_knowledge_s{
             .filename = entry.filename,
             .title = entry.title,
+            .tag_name = entry.tag_name,
             .content = std::move(content),
             .score = score,
             .source = document.source,
@@ -1730,14 +2255,16 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
         return {};
     }
 
-    const auto terms = make_effective_search_terms(make_search_terms(normalized_query));
+    const auto search_terms = make_search_terms(normalized_query);
+    const auto terms = make_effective_search_terms(search_terms);
+    const auto tag_query_terms = make_tag_query_terms(search_terms);
 
     if (terms.empty()) {
         return {};
     }
 
-    auto frequent_query_results = std::vector<retrieved_knowledge_s>{};
-    frequent_query_results.reserve(std::min(options.limit * 2, m_documents.size()));
+    auto frequent_query_candidates = std::vector<knowledge_document_candidate_s>{};
+    frequent_query_candidates.reserve(std::min(options.limit * 2, m_documents.size()));
 
     for (const auto &[file_path, document] : m_documents) {
         if (document.glossary || !document_matches_options(document, options)) {
@@ -1750,29 +2277,26 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        frequent_query_results.push_back(make_retrieved_document(file_path,
-                                                                 document,
-                                                                 frequent_score.score,
-                                                                 options.max_chars_per_document,
-                                                                 frequent_score.match));
+        frequent_query_candidates.push_back(knowledge_document_candidate_s{
+                .file_path = file_path,
+                .document = &document,
+                .score = frequent_score.score,
+                .match = frequent_score.match,
+        });
     }
 
-    if (!frequent_query_results.empty()) {
-        std::ranges::sort(frequent_query_results,
-                          [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
-                              if (lhs.score != rhs.score) {
-                                  return lhs.score > rhs.score;
-                              }
+    if (!frequent_query_candidates.empty()) {
+        sort_document_candidates(frequent_query_candidates);
+        frequent_query_candidates.resize(1);
 
-                              return lhs.filename < rhs.filename;
-                          });
-
-        frequent_query_results.resize(1);
-        return frequent_query_results;
+        return materialize_document_candidates(frequent_query_candidates,
+                                               options.max_chars_per_document,
+                                               normalized_query,
+                                               tag_query_terms);
     }
 
-    auto ranked_context_query_results = std::vector<retrieved_knowledge_s>{};
-    ranked_context_query_results.reserve(std::min(options.limit * 2, m_documents.size()));
+    auto ranked_context_query_candidates = std::vector<knowledge_document_candidate_s>{};
+    ranked_context_query_candidates.reserve(std::min(options.limit * 2, m_documents.size()));
 
     for (const auto &[file_path, document] : m_documents) {
         if (document.glossary || !document_matches_options(document, options)) {
@@ -1793,38 +2317,36 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        ranked_context_query_results.push_back(make_retrieved_document(file_path,
-                                                                       document,
-                                                                       score,
-                                                                       options.max_chars_per_document,
-                                                                       knowledge_match_e::ranked));
+        ranked_context_query_candidates.push_back(knowledge_document_candidate_s{
+                .file_path = file_path,
+                .document = &document,
+                .score = score,
+                .match = knowledge_match_e::ranked,
+        });
     }
 
-    if (!ranked_context_query_results.empty()) {
-        std::ranges::sort(ranked_context_query_results,
-                          [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
-                              if (lhs.score != rhs.score) {
-                                  return lhs.score > rhs.score;
-                              }
+    if (!ranked_context_query_candidates.empty()) {
+        sort_document_candidates(ranked_context_query_candidates);
 
-                              return lhs.filename < rhs.filename;
-                          });
+        const auto best_score = ranked_context_query_candidates.front().score;
 
-        const auto best_score = ranked_context_query_results.front().score;
-
-        std::erase_if(ranked_context_query_results, [best_score](const retrieved_knowledge_s &item) noexcept {
+        std::erase_if(ranked_context_query_candidates,
+                      [best_score](const knowledge_document_candidate_s &item) noexcept {
             return item.score + ranked_context_query_secondary_gap < best_score;
         });
 
-        if (ranked_context_query_results.size() > options.limit) {
-            ranked_context_query_results.resize(options.limit);
+        if (ranked_context_query_candidates.size() > options.limit) {
+            ranked_context_query_candidates.resize(options.limit);
         }
 
-        return ranked_context_query_results;
+        return materialize_document_candidates(ranked_context_query_candidates,
+                                               options.max_chars_per_document,
+                                               normalized_query,
+                                               tag_query_terms);
     }
 
-    auto ranked_results = std::vector<retrieved_knowledge_s>{};
-    ranked_results.reserve(std::min(options.limit, m_documents.size()));
+    auto ranked_candidates = std::vector<knowledge_document_candidate_s>{};
+    ranked_candidates.reserve(std::min(options.limit, m_documents.size()));
 
     for (const auto &[file_path, document] : m_documents) {
         if (document.glossary || !document_matches_options(document, options)) {
@@ -1844,26 +2366,24 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve(const std::string_
             continue;
         }
 
-        ranked_results.push_back(make_retrieved_document(file_path,
-                                                         document,
-                                                         score,
-                                                         options.max_chars_per_document,
-                                                         knowledge_match_e::ranked));
+        ranked_candidates.push_back(knowledge_document_candidate_s{
+                .file_path = file_path,
+                .document = &document,
+                .score = score,
+                .match = knowledge_match_e::ranked,
+        });
     }
 
-    std::ranges::sort(ranked_results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
-        if (lhs.score != rhs.score) {
-            return lhs.score > rhs.score;
-        }
+    sort_document_candidates(ranked_candidates);
 
-        return lhs.filename < rhs.filename;
-    });
-
-    if (ranked_results.size() > options.limit) {
-        ranked_results.resize(options.limit);
+    if (ranked_candidates.size() > options.limit) {
+        ranked_candidates.resize(options.limit);
     }
 
-    return ranked_results;
+    return materialize_document_candidates(ranked_candidates,
+                                           options.max_chars_per_document,
+                                           normalized_query,
+                                           tag_query_terms);
 }
 
 std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
@@ -1975,12 +2495,21 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
 std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
         const std::span<const std::string> filenames,
         const knowledge_retrieve_options_s &options) const {
+    return retrieve_by_filenames(filenames, {}, options);
+}
+
+std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
+        const std::span<const std::string> filenames,
+        const std::string_view query,
+        const knowledge_retrieve_options_s &options) const {
     if (m_documents.empty() || filenames.empty() || options.limit == 0) {
         return {};
     }
 
     auto result = std::vector<retrieved_knowledge_s>{};
     auto seen = std::unordered_set<std::string>{};
+    const auto normalized_query = make_search_key(query);
+    const auto tag_query_terms = make_tag_query_terms(make_search_terms(normalized_query));
 
     result.reserve(std::min(options.limit, filenames.size()));
 
@@ -2026,7 +2555,10 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_by_filenames(
                                                      document_it->second,
                                                      1,
                                                      options.max_chars_per_document,
-                                                     knowledge_match_e::ranked));
+                                                     knowledge_match_e::ranked,
+                                                     normalized_query,
+                                                     tag_query_terms,
+                                                     false));
         }
 
         if (result.size() >= options.limit) {

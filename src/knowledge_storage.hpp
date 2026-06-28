@@ -57,6 +57,10 @@ struct knowledge_tag_content_s {
 
     // Compact plain text prepared once during load(). Used in LLM prompts.
     std::string model_content = {};
+
+    // Cached H2 heading data used to select one relevant section per query.
+    std::string normalized_name = {};
+    std::vector<std::string> search_terms = {};
 };
 
 using knowledge_tags_t = std::map<knowledge_tag_name_t, knowledge_tag_content_s, std::less<>>;
@@ -106,11 +110,24 @@ struct knowledge_glossary_entry_s {
 struct retrieved_knowledge_s {
     std::string filename = {};
     std::string title = {};
+    std::string tag_name = {};
     std::string content = {};
+
+    // Original Markdown body retained only when the current query explicitly selected this H2 section.
+    std::string direct_content = {};
+
+    // Normalized semantic parts of a compound query. The document part keeps
+    // the scenario, while the section part keeps the H2-specific refinement.
+    std::string document_query = {};
+    std::string section_query = {};
+
     std::size_t score = {};
     knowledge_source_e source = knowledge_source_e::builtin;
     workplace_role_e role = workplace_role_e::general;
     knowledge_match_e match = knowledge_match_e::none;
+
+    // Distinguishes a real query-to-heading match from the default instruction-section fallback.
+    bool tag_matched_query = false;
 };
 
 struct knowledge_retrieve_options_s {
@@ -137,6 +154,11 @@ public:
 
     [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve_by_filenames(
             std::span<const std::string> filenames,
+            const knowledge_retrieve_options_s &options) const;
+
+    [[nodiscard]] std::vector<retrieved_knowledge_s> retrieve_by_filenames(
+            std::span<const std::string> filenames,
+            std::string_view query,
             const knowledge_retrieve_options_s &options) const;
 
     [[nodiscard]] bool empty() const noexcept;

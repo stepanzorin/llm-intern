@@ -558,6 +558,18 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
            match == knowledge_match_e::unordered_fuzzy_frequent_query || is_glossary_match(match);
 }
 
+[[nodiscard]] bool is_query_matched_document_tag_candidate(
+        const std::span<const retrieved_knowledge_s> knowledge) noexcept {
+    if (knowledge.size() != 1) {
+        return false;
+    }
+
+    const auto &item = knowledge.front();
+
+    return item.tag_matched_query && !item.tag_name.empty() && !item.direct_content.empty() &&
+           !is_glossary_match(item.match);
+}
+
 [[nodiscard]] bool looks_like_instruction_analysis_request(const std::string_view user_text) {
     const auto normalized_text = normalize_user_query_for_relation(user_text);
 
@@ -571,10 +583,11 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
      *
      * Example:
      *   "как удалить запись"                                  -> direct instruction is fine
-     *   "какие проблемы могут возникнуть при удалении записи" -> give the file to LLM
+     *   "какие проблемы могут возникнуть при удалении записи" -> use a matching H2 section;
+     *                                                               otherwise give the file to LLM
      *
-     * So this predicate must only block direct Markdown inlining.
-     * It must not prevent KnowledgeStorage from selecting the best file.
+     * So this predicate blocks only the old whole-instruction direct path.
+     * An H2 section explicitly selected by the current query is handled first.
      */
     constexpr auto analysis_prefixes = std::array{
             std::string_view{"какие проблемы"},
@@ -655,6 +668,15 @@ void append_lowercase_utf8_codepoint(const char32_t codepoint, std::string &resu
 
 [[nodiscard]] bool should_answer_without_llm(const std::string_view user_text,
                                              const std::span<const retrieved_knowledge_s> knowledge) {
+    /*
+     * An H2 section explicitly selected by the current query is already the
+     * complete source answer. This applies both to a fresh request and to a
+     * follow-up resolved against the active source file.
+     */
+    if (is_query_matched_document_tag_candidate(knowledge)) {
+        return true;
+    }
+
     if (!is_direct_knowledge_answer_candidate(knowledge)) {
         return false;
     }
@@ -1409,8 +1431,9 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
     for (const auto &item : primary_knowledge) {
         m_logger->info("Retrieved knowledge: {} "
-                       "score={} role={} source={} match={}",
+                       "section='{}' score={} role={} source={} match={}",
                        item.filename,
+                       item.tag_name,
                        item.score,
                        to_string(item.role),
                        to_string(item.source),
@@ -1434,6 +1457,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
     if (relation == chat_relation_kind_e::follow_up) {
         const auto inherited_knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames,
+                                                                           user_text,
                                                                            retrieve_options);
 
         const auto contextual_query = build_contextual_retrieval_query(user_text);
@@ -1454,8 +1478,9 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
         for (const auto &item : inherited_knowledge) {
             m_logger->info("Inherited contextual knowledge: {} "
-                           "score={} role={} source={} match={}",
+                           "section='{}' score={} role={} source={} match={}",
                            item.filename,
+                           item.tag_name,
                            item.score,
                            to_string(item.role),
                            to_string(item.source),
@@ -1464,8 +1489,9 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
         for (const auto &item : contextual_knowledge) {
             m_logger->info("Contextual retrieval knowledge: {} "
-                           "score={} role={} source={} match={}",
+                           "section='{}' score={} role={} source={} match={}",
                            item.filename,
+                           item.tag_name,
                            item.score,
                            to_string(item.role),
                            to_string(item.source),
@@ -1478,12 +1504,15 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
          * already active in the current scenario, which adds legitimate detail
          * without allowing retrieval drift into a neighbouring instruction.
          */
-        knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames, retrieve_options);
+        knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames,
+                                                      user_text,
+                                                      retrieve_options);
 
         for (const auto &item : knowledge) {
             m_logger->info("Inherited knowledge for answer expansion: {} "
-                           "score={} role={} source={} match={}",
+                           "section='{}' score={} role={} source={} match={}",
                            item.filename,
+                           item.tag_name,
                            item.score,
                            to_string(item.role),
                            to_string(item.source),
@@ -1492,24 +1521,29 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     }
 
     /*
-     * Восстановленная рабочая логика.
+     * Direct Markdown answer paths:
+     * 1. The previous exact frequent-query or glossary-heading match.
+     * 2. One H2 section explicitly selected by the current standalone or
+     *    follow-up query inside the already resolved source document.
      *
-     * Если KnowledgeStorage вернул ровно один файл
-     * с прямым совпадением по частым запросам
-     * или glossary-заголовку второго уровня,
-     * ответ извлекается непосредственно из Markdown.
-     *
-     * llama-server и LlamaClient в этой ветке
-     * вообще не используются.
+     * llama-server and LlamaClient are not used in either case.
      */
-    if (relation == chat_relation_kind_e::standalone && should_answer_without_llm(user_text, knowledge)) {
+    const auto direct_answer_relation = relation == chat_relation_kind_e::standalone ||
+                                        relation == chat_relation_kind_e::follow_up;
+
+    if (direct_answer_relation && should_answer_without_llm(user_text, knowledge)) {
         auto source_filenames = make_source_filenames(knowledge);
 
         auto answer_body = make_direct_answer(knowledge);
 
         auto answer = ensure_sources_block(answer_body, source_filenames);
 
-        auto context_state = make_context_state(false, false, user_text, answer_body, source_filenames);
+        auto context_state = make_context_state(relation != chat_relation_kind_e::standalone,
+                                                relation == chat_relation_kind_e::follow_up,
+                                                user_text,
+                                                answer_body,
+                                                source_filenames,
+                                                knowledge);
 
         const auto user_id = m_history[user_index].id;
 
@@ -1517,11 +1551,14 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
         m_history[user_index].status = chat_message_status_e::completed;
 
-        m_history[user_index].relatives.clear();
+        if (relation == chat_relation_kind_e::follow_up) {
+            m_history[user_index].relatives = m_last_topic_anchor_ids;
+        } else {
+            m_history[user_index].relatives.clear();
+        }
 
-        auto assistant_relatives = std::vector<std::uint64_t>{
-                user_id,
-        };
+        auto assistant_relatives = m_history[user_index].relatives;
+        assistant_relatives.push_back(user_id);
 
         const auto assistant_id = make_next_chat_entry_id(m_history);
 
@@ -1550,13 +1587,14 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
         });
 
         m_context_state = std::move(context_state);
-        m_last_topic_anchor_ids = make_topic_anchor_ids({}, user_id, assistant_id);
+        m_last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
 
         save_history();
 
         m_logger->info("Answered without LLM by direct knowledge match: "
-                       "file={} score={} match={}",
+                       "file={} section='{}' score={} match={}",
                        knowledge.front().filename,
+                       knowledge.front().tag_name,
                        knowledge.front().score,
                        to_string(knowledge.front().match));
 
@@ -1657,7 +1695,8 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                             relation == chat_relation_kind_e::follow_up,
                                             user_text,
                                             answer_body,
-                                            source_filenames);
+                                            source_filenames,
+                                            knowledge);
 
     const auto user_id = m_history[user_index].id;
 
@@ -1957,6 +1996,11 @@ std::string LlamaEngine::build_knowledge_base_block(
                                   item.filename,
                                   item.title,
                                   content);
+        } else if (!item.tag_name.empty()) {
+            prompt += std::format("<doc name=\"{}\" section=\"{}\">\n{}\n</doc>\n",
+                                  item.filename,
+                                  item.tag_name,
+                                  content);
         } else {
             prompt += std::format("<doc name=\"{}\">\n{}\n</doc>\n", item.filename, content);
         }
@@ -2138,17 +2182,42 @@ chat_context_state_s LlamaEngine::make_context_state(
         const bool remember_user_message,
         const std::string_view user_text,
         const std::string_view answer_body,
-        const std::span<const std::string> source_filenames) const {
+        const std::span<const std::string> source_filenames,
+        const std::span<const retrieved_knowledge_s> knowledge) const {
     auto state = follow_up && m_context_state.has_value() ? *m_context_state : chat_context_state_s{};
     const auto compact_user_text = truncate_utf8(make_chat_model_content(user_text, chat_role_e::user),
                                                  m_config.max_context_chars_per_user_message);
 
+    const auto *split_knowledge =
+            knowledge.size() == 1 && !knowledge.front().document_query.empty() &&
+                            !knowledge.front().section_query.empty()
+                    ? &knowledge.front()
+                    : nullptr;
+
+    const auto compact_document_query = split_knowledge == nullptr
+                                                ? std::string{}
+                                                : truncate_utf8(split_knowledge->document_query,
+                                                                m_config.max_context_chars_per_user_message);
+    const auto compact_section_query = split_knowledge == nullptr
+                                               ? std::string{}
+                                               : truncate_utf8(split_knowledge->section_query,
+                                                               m_config.max_context_chars_per_user_message);
+
     if (!follow_up || state.topic.empty()) {
-        state.topic = compact_user_text;
+        state.topic = compact_document_query.empty() ? compact_user_text : compact_document_query;
         state.recent_user_messages.clear();
+
+        if (!compact_section_query.empty() && m_config.max_context_user_messages != 0) {
+            state.recent_user_messages.push_back(compact_section_query);
+        }
+
         state.source_files.clear();
-    } else if (remember_user_message && !compact_user_text.empty() && m_config.max_context_user_messages != 0) {
-        state.recent_user_messages.push_back(compact_user_text);
+    } else if (remember_user_message && m_config.max_context_user_messages != 0) {
+        const auto &message = compact_section_query.empty() ? compact_user_text : compact_section_query;
+
+        if (!message.empty()) {
+            state.recent_user_messages.push_back(message);
+        }
 
         if (state.recent_user_messages.size() > m_config.max_context_user_messages) {
             state.recent_user_messages.erase(
@@ -2311,13 +2380,8 @@ std::string LlamaEngine::ensure_sources_block(std::string answer, const std::spa
 }
 
 bool LlamaEngine::can_answer_without_llm(const std::span<const retrieved_knowledge_s> knowledge) noexcept {
-    /*
-     * Полностью восстановлен прежний рабочий контракт:
-     *
-     * KnowledgeStorage должен вернуть один-единственный
-     * документ с прямым совпадением.
-     */
-    return is_direct_knowledge_answer_candidate(knowledge);
+    return is_direct_knowledge_answer_candidate(knowledge) ||
+           is_query_matched_document_tag_candidate(knowledge);
 }
 
 std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_knowledge_s> knowledge) {
@@ -2325,6 +2389,12 @@ std::string LlamaEngine::make_direct_answer(const std::span<const retrieved_know
 
     if (!can_answer_without_llm(knowledge)) {
         std::terminate();
+    }
+
+    if (is_query_matched_document_tag_candidate(knowledge)) {
+        auto content = knowledge.front().direct_content;
+        util::trim(content);
+        return remove_direct_answer_search_hints(content);
     }
 
     if (is_glossary_match(knowledge.front().match)) {
