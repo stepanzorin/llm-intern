@@ -248,6 +248,65 @@
                             </div>
 
                             <div class="composer__toolbar-right">
+                                <details
+                                        class="assistant-profile-menu"
+                                        id="assistant-profile-menu"
+                                >
+                                    <summary
+                                            class="assistant-profile-menu__trigger"
+                                            aria-label="Выбрать режим бота"
+                                            title="Выбрать режим бота"
+                                    >
+                                        <span id="assistant-profile-label">
+                                            Рабочие инструкции
+                                        </span>
+
+                                        <svg
+                                                width="14"
+                                                height="14"
+                                                viewBox="0 0 20 20"
+                                                fill="none"
+                                                aria-hidden="true"
+                                        >
+                                            <path
+                                                    d="m6 8 4 4 4-4"
+                                                    stroke="currentColor"
+                                                    stroke-width="1.8"
+                                                    stroke-linecap="round"
+                                                    stroke-linejoin="round"
+                                            />
+                                        </svg>
+                                    </summary>
+
+                                    <div class="assistant-profile-menu__content">
+                                        <button
+                                                class="assistant-profile-menu__item"
+                                                type="button"
+                                                data-assistant-profile="workflow"
+                                                aria-pressed="true"
+                                        >
+                                            <span>
+                                                <strong>Рабочие инструкции</strong>
+                                                <small>Регламенты и подсказки</small>
+                                            </span>
+                                        </button>
+
+                                        <button
+                                                class="assistant-profile-menu__item"
+                                                type="button"
+                                                data-assistant-profile="texting"
+                                                aria-pressed="false"
+                                        >
+                                            <span>
+                                                <strong>Ответы клиентам</strong>
+                                                <small>Готовые тексты по шаблонам</small>
+                                            </span>
+
+                                            <span class="badge">PREMIUM</span>
+                                        </button>
+                                    </div>
+                                </details>
+
                                 <button
                                         class="composer__send"
                                         id="send-message"
@@ -336,7 +395,7 @@
         </header>
 
         <div class="modal__body">
-            <div class="cheatsheets-grid">
+            <div class="cheatsheets-grid" data-cheatsheets-profile="workflow">
                 <section class="cheatsheet-group">
                     <h3>
                         Часто задаваемые вопросы
@@ -465,6 +524,68 @@
                     <p class="cheatsheet-group__hint">
                         До пяти собственных подсказок
                         доступны на тарифе FREE.
+                    </p>
+                </section>
+            </div>
+
+            <div
+                    class="cheatsheets-grid"
+                    data-cheatsheets-profile="texting"
+                    hidden
+            >
+                <section class="cheatsheet-group">
+                    <h3>Негативная обратная связь</h3>
+
+                    <button type="button" data-cheatsheet-text>
+                        Как ответить клиенту?
+
+Добрый день. Я не осталась довольна результатом и повторять не планирую.
+                    </button>
+
+                    <button type="button" data-cheatsheet-text>
+                        Клиент жалуется на качество работы. Составь дружелюбный ответ.
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group">
+                    <h3>Изменения записи</h3>
+
+                    <button type="button" data-cheatsheet-text>
+                        Имя: Анна
+Клиент опаздывает
+                    </button>
+
+                    <button type="button" data-cheatsheet-text>
+                        Имя: Мария
+Мастер заболел
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group">
+                    <h3>Изменить готовый ответ</h3>
+
+                    <button type="button" data-cheatsheet-text>
+                        Сделай короче
+                    </button>
+
+                    <button type="button" data-cheatsheet-text>
+                        Сделай дружелюбнее и добавь немного эмодзи
+                    </button>
+
+                    <button type="button" data-cheatsheet-text>
+                        Сделай более формально
+                    </button>
+                </section>
+
+                <section class="cheatsheet-group">
+                    <h3>Свободная формулировка</h3>
+
+                    <button type="button" data-cheatsheet-text>
+                        Составь уважительный ответ клиенту без обещаний компенсации.
+                    </button>
+
+                    <p class="cheatsheet-group__hint">
+                        Вставьте сообщение клиента после пустой строки — переносы сохранятся.
                     </p>
                 </section>
             </div>

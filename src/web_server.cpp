@@ -1,6 +1,8 @@
 #include "web_server.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -14,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "application.hpp"
+#include "assistant_profile.hpp"
 #include "platform.hpp"
 
 #ifdef STZ_INTERN_PLATFORM_WINDOWS
@@ -191,6 +194,36 @@ void append_history_message_json(json &messages,
 
 [[nodiscard]] bool is_api_path(const std::string_view path) noexcept {
     return path == "/api" || path.starts_with("/api/");
+}
+
+[[nodiscard]] std::string lowercase_ascii(std::string text) {
+    std::ranges::transform(text, text.begin(), [](const unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    return text;
+}
+
+template<typename Subscription>
+[[nodiscard]] bool subscription_allows_texting(const Subscription subscription) {
+    return lowercase_ascii(std::string{to_string(subscription)}) == "premium";
+}
+
+[[nodiscard]] json make_assistant_profiles_json(const bool texting_available) {
+    return json::array({
+            json{
+                    {"id", "workflow"},
+                    {"label", "Рабочие инструкции"},
+                    {"available", true},
+                    {"premium", false},
+            },
+            json{
+                    {"id", "texting"},
+                    {"label", "Ответы клиентам"},
+                    {"available", texting_available},
+                    {"premium", true},
+            },
+    });
 }
 
 #ifdef STZ_INTERN_PLATFORM_WINDOWS
@@ -440,6 +473,10 @@ void WebServer::register_api_routes() {
         handle_post_chat_message(request, response);
     });
 
+    m_http_server.Put("/api/chat/profile", [this](const httplib::Request &request, httplib::Response &response) {
+        handle_put_chat_profile(request, response);
+    });
+
     m_http_server.Post("/api/chat/stop", [this](const httplib::Request &request, httplib::Response &response) {
         handle_post_stop_generation(request, response);
     });
@@ -605,53 +642,34 @@ void WebServer::open_browser() const noexcept {
 
 void WebServer::handle_get_application_state(const httplib::Request &, httplib::Response &response) {
     const auto state = m_application.state();
+    const auto texting_available = subscription_allows_texting(state.subscription);
+    auto assistant_profile = m_application.assistant_profile();
+
+    /*
+     * A saved premium profile must never leak into the UI after the subscription
+     * was downgraded. Switching back here also fixes refresh/reopen scenarios.
+     */
+    if (!texting_available && assistant_profile == assistant_profile_e::texting && !state.model_generates) {
+        m_application.change_assistant_profile(assistant_profile_e::workflow);
+        assistant_profile = assistant_profile_e::workflow;
+    }
 
     set_json_response(response,
                       json{
-                              {
-                                      "application_running",
-                                      state.application_running,
-                              },
-                              {
-                                      "activated",
-                                      state.activated,
-                              },
-                              {
-                                      "access_state",
-                                      to_string(state.access_state),
-                              },
-                              {
-                                      "subscription",
-                                      to_string(state.subscription),
-                              },
-                              {
-                                      "llama_server_running",
-                                      state.llama_server_running,
-                              },
-                              {
-                                      "model_generates",
-                                      state.model_generates,
-                              },
-                              {
-                                      "company_name",
-                                      state.company_name,
-                              },
-                              {
-                                      "point_name",
-                                      state.point_name,
-                              },
-                              {
-                                      "point_address",
-                                      state.point_address,
-                              },
-                              {
-                                      "application_version",
-                                      state.application_version,
-                              },
-                              {
-                                      "initial_page",
-                                      m_application.initial_page(),
-                              },
+                              {"application_running", state.application_running},
+                              {"activated", state.activated},
+                              {"access_state", to_string(state.access_state)},
+                              {"subscription", to_string(state.subscription)},
+                              {"llama_server_running", state.llama_server_running},
+                              {"model_generates", state.model_generates},
+                              {"company_name", state.company_name},
+                              {"point_name", state.point_name},
+                              {"point_address", state.point_address},
+                              {"application_version", state.application_version},
+                              {"initial_page", m_application.initial_page()},
+                              {"assistant_profile", to_string(assistant_profile)},
+                              {"assistant_profiles", make_assistant_profiles_json(texting_available)},
+                              {"texting_available", texting_available},
                       });
 }
 
@@ -697,8 +715,12 @@ void WebServer::handle_post_chat_message(const httplib::Request &request, httpli
 
         const auto state = m_application.state();
 
-        if (!state.llama_server_running) {
-            set_error_response(response, 503, "llama_server_unavailable", "Модель ещё не запущена");
+        if (m_application.assistant_profile() == assistant_profile_e::texting &&
+            !subscription_allows_texting(state.subscription)) {
+            set_error_response(response,
+                               403,
+                               "premium_profile_required",
+                               "Составление ответов клиентам доступно только на тарифе PREMIUM");
 
             return;
         }
@@ -732,11 +754,64 @@ void WebServer::handle_post_chat_message(const httplib::Request &request, httpli
     } catch (const std::runtime_error &error) {
         m_logger->warn("Chat request failed: {}", error.what());
 
-        set_error_response(response, 400, "invalid_request", error.what());
+        const auto message = std::string_view{error.what()};
+
+        if (message.contains("llama-server") || message.contains("model is not ready")) {
+            set_error_response(response, 503, "llama_server_unavailable", "Модель ещё не запущена");
+        } else {
+            set_error_response(response, 400, "invalid_request", error.what());
+        }
     } catch (const std::exception &error) {
         m_logger->error("Failed to process chat message: {}", error.what());
 
         set_error_response(response, 500, "generation_failed", "Не удалось получить ответ от бота");
+    }
+}
+
+void WebServer::handle_put_chat_profile(const httplib::Request &request, httplib::Response &response) {
+    try {
+        if (!m_application.can_use_chat()) {
+            set_error_response(response, 403, "chat_access_denied", "Доступ к чату недоступен");
+            return;
+        }
+
+        const auto state = m_application.state();
+
+        if (state.model_generates) {
+            set_error_response(response,
+                               409,
+                               "generation_in_progress",
+                               "Нельзя переключить режим во время формирования ответа");
+            return;
+        }
+
+        const auto root = parse_json_object(request);
+        const auto profile = assistant_profile_from_string(read_required_string(root, "profile"));
+
+        if (profile == assistant_profile_e::texting && !subscription_allows_texting(state.subscription)) {
+            set_error_response(response,
+                               403,
+                               "premium_profile_required",
+                               "Составление ответов клиентам доступно только на тарифе PREMIUM");
+            return;
+        }
+
+        const auto changed = m_application.change_assistant_profile(profile);
+
+        set_json_response(response,
+                          json{
+                                  {"changed", changed},
+                                  {"assistant_profile", to_string(m_application.assistant_profile())},
+                          });
+    } catch (const json::exception &error) {
+        m_logger->warn("Invalid assistant profile request JSON: {}", error.what());
+        set_error_response(response, 400, "invalid_json", "Некорректный JSON запроса");
+    } catch (const std::runtime_error &error) {
+        m_logger->warn("Failed to change assistant profile: {}", error.what());
+        set_error_response(response, 400, "invalid_assistant_profile", error.what());
+    } catch (const std::exception &error) {
+        m_logger->error("Failed to change assistant profile: {}", error.what());
+        set_error_response(response, 500, "assistant_profile_change_failed", "Не удалось переключить режим бота");
     }
 }
 

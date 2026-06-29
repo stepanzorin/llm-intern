@@ -22,6 +22,25 @@ enum class knowledge_source_e {
     custom,
 };
 
+enum class knowledge_domain_e {
+    workflow,
+    texting,
+};
+
+enum class knowledge_document_kind_e {
+    workflow,
+    glossary,
+    texting_script,
+    texting_structure,
+};
+
+enum class texting_style_e {
+    any,
+    formal,
+    neutral,
+    friendly,
+};
+
 enum class workplace_role_e {
     general,
     barista,
@@ -41,6 +60,12 @@ enum class knowledge_match_e {
 };
 
 [[nodiscard]] std::string_view to_string(knowledge_source_e source) noexcept;
+
+[[nodiscard]] std::string_view to_string(knowledge_domain_e domain) noexcept;
+
+[[nodiscard]] std::string_view to_string(knowledge_document_kind_e kind) noexcept;
+
+[[nodiscard]] std::string_view to_string(texting_style_e style) noexcept;
 
 [[nodiscard]] std::string_view to_string(workplace_role_e role) noexcept;
 
@@ -94,6 +119,8 @@ struct knowledge_document_s {
     std::vector<std::vector<std::string>> frequent_query_terms = {};
 
     knowledge_source_e source = knowledge_source_e::builtin;
+    knowledge_document_kind_e kind = knowledge_document_kind_e::workflow;
+    texting_style_e texting_style = texting_style_e::any;
     workplace_role_e role = workplace_role_e::general;
     bool glossary = false;
 };
@@ -123,6 +150,8 @@ struct retrieved_knowledge_s {
 
     std::size_t score = {};
     knowledge_source_e source = knowledge_source_e::builtin;
+    knowledge_document_kind_e kind = knowledge_document_kind_e::workflow;
+    texting_style_e texting_style = texting_style_e::any;
     workplace_role_e role = workplace_role_e::general;
     knowledge_match_e match = knowledge_match_e::none;
 
@@ -133,7 +162,9 @@ struct retrieved_knowledge_s {
 struct knowledge_retrieve_options_s {
     workplace_role_e workplace_role = workplace_role_e::general;
     bool include_general = true;
+    bool include_builtin = true;
     bool include_custom = true;
+    texting_style_e texting_style = texting_style_e::any;
     std::size_t limit = 3;
     std::size_t max_chars_per_document = 3000;
     std::size_t min_ranked_score = 512;
@@ -141,7 +172,9 @@ struct knowledge_retrieve_options_s {
 
 class KnowledgeStorage final {
 public:
-    KnowledgeStorage(std::filesystem::path directory, std::shared_ptr<spdlog::logger> logger);
+    KnowledgeStorage(std::filesystem::path directory,
+                     knowledge_domain_e domain,
+                     std::shared_ptr<spdlog::logger> logger);
 
     void load();
 
@@ -169,6 +202,7 @@ private:
     using document_map_t = std::unordered_map<knowledge_file_path_t, knowledge_document_s, detail::path_hash>;
 
     std::filesystem::path m_directory;
+    knowledge_domain_e m_domain = knowledge_domain_e::workflow;
     document_map_t m_documents;
     std::vector<knowledge_glossary_entry_s> m_glossaries;
     std::shared_ptr<spdlog::logger> m_logger;

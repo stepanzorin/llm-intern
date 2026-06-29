@@ -100,6 +100,8 @@ private:
 
     void handle_post_chat_message(const httplib::Request &request, httplib::Response &response);
 
+    void handle_put_chat_profile(const httplib::Request &request, httplib::Response &response);
+
     void handle_post_stop_generation(const httplib::Request &request, httplib::Response &response);
 
     void handle_post_restart_server(const httplib::Request &request, httplib::Response &response);

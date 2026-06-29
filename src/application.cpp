@@ -32,6 +32,10 @@ namespace {
     return state == application_access_state_e::active || state == application_access_state_e::offline_grace_period;
 }
 
+[[nodiscard]] bool subscription_allows_texting(const subscription_plan_e plan) noexcept {
+    return plan == subscription_plan_e::premium;
+}
+
 } // namespace
 
 std::string_view to_string(const subscription_plan_e plan) noexcept {
@@ -233,6 +237,28 @@ application_operation_result_s Application::restart_model_server() {
     }
 }
 
+assistant_profile_e Application::assistant_profile() const noexcept { return m_assistant_profile.load(); }
+
+bool Application::change_assistant_profile(const assistant_profile_e profile) {
+    ensure_chat_access();
+
+    if (profile == assistant_profile_e::texting && !subscription_allows_texting(m_subscription.load())) {
+        throw std::runtime_error{"Texting assistant is available only with PREMIUM subscription"};
+    }
+
+    const auto lock = std::unique_lock{m_engine_mutex, std::try_to_lock};
+
+    if (!lock.owns_lock()) {
+        throw std::runtime_error{"Cannot change assistant profile while an answer is being generated"};
+    }
+
+    const auto changed = m_engine->change_profile(profile);
+
+    m_assistant_profile.store(m_engine->active_profile());
+
+    return changed;
+}
+
 std::vector<chat_history_entry_s> Application::history_snapshot() const {
     auto lock = std::scoped_lock{m_engine_mutex};
 
@@ -412,7 +438,7 @@ void Application::initialize_authentication() {
     if (!m_config.auth.enabled || m_config.auth.development_bypass) {
         m_activated.store(true);
         m_access_state.store(application_access_state_e::active);
-        m_subscription.store(subscription_plan_e::free);
+        m_subscription.store(subscription_plan_e::premium);
 
         m_logger->warn("Remote authentication is disabled. "
                        "Development access with FREE subscription is enabled");
@@ -456,6 +482,21 @@ void Application::start_components() {
     m_logger->info("Loading LlamaEngine");
 
     m_engine->load();
+
+    auto restored_profile = m_engine->active_profile();
+
+    if (restored_profile == assistant_profile_e::texting &&
+        !subscription_allows_texting(m_subscription.load())) {
+        m_logger->warn("Saved assistant profile '{}' is unavailable for subscription '{}'. Switching to '{}'.",
+                       to_string(restored_profile),
+                       to_string(m_subscription.load()),
+                       to_string(assistant_profile_e::workflow));
+
+        std::ignore = m_engine->change_profile(assistant_profile_e::workflow);
+        restored_profile = assistant_profile_e::workflow;
+    }
+
+    m_assistant_profile.store(restored_profile);
 
     m_logger->info("Starting LlamaEngine and llama-server");
 

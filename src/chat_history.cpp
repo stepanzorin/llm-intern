@@ -300,6 +300,7 @@ std::string_view to_string(const chat_answer_kind_e answer_kind) noexcept {
     switch (answer_kind) {
         case chat_answer_kind_e::unknown: return "unknown";
         case chat_answer_kind_e::direct_knowledge: return "direct_knowledge";
+        case chat_answer_kind_e::direct_template: return "direct_template";
         case chat_answer_kind_e::llm: return "llm";
         case chat_answer_kind_e::policy_rejection: return "policy_rejection";
     }
@@ -341,6 +342,10 @@ chat_answer_kind_e chat_answer_kind_from_string(const std::string_view answer_ki
 
     if (answer_kind == "direct_knowledge") {
         return chat_answer_kind_e::direct_knowledge;
+    }
+
+    if (answer_kind == "direct_template") {
+        return chat_answer_kind_e::direct_template;
     }
 
     if (answer_kind == "llm") {

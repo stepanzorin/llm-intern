@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +15,7 @@
 
 #include <spdlog/logger.h>
 
+#include "assistant_profile.hpp"
 #include "chat_history.hpp"
 #include "knowledge_storage.hpp"
 #include "llm/llama_client.hpp"
@@ -25,10 +27,15 @@ struct engine_config_s {
     llm::llama_server_config_s server = {};
     llm::llama_client_config_s client = {};
 
+    // Existing history_file remains the workflow history for backward compatibility.
     std::filesystem::path history_file = "message_history.json";
+    std::filesystem::path texting_history_file = "message_history_texting.json";
+    std::filesystem::path assistant_profile_state_file = "backend/assistant_profile.json";
     std::filesystem::path knowledge_directory = "knowledge";
 
+    assistant_profile_e initial_profile = assistant_profile_e::workflow;
     workplace_role_e workplace_role = workplace_role_e::general;
+    texting_style_e texting_style = texting_style_e::neutral;
 
     std::size_t max_knowledge_documents = 2;
     std::size_t max_knowledge_chars_per_document = 2500;
@@ -45,6 +52,35 @@ struct engine_config_s {
 
     std::size_t max_contextual_retrieval_chars = 700;
     std::size_t max_transform_answer_chars = 1200;
+};
+
+
+struct assistant_context_s {
+    assistant_context_s(assistant_profile_e profile,
+                        std::filesystem::path history_file,
+                        std::filesystem::path knowledge_directory,
+                        workplace_role_e workplace_role,
+                        const std::shared_ptr<spdlog::logger> &logger);
+
+    assistant_context_s(const assistant_context_s &) = delete;
+    assistant_context_s &operator=(const assistant_context_s &) = delete;
+
+    assistant_context_s(assistant_context_s &&) noexcept = default;
+    assistant_context_s &operator=(assistant_context_s &&) noexcept = default;
+
+    assistant_profile_e profile = assistant_profile_e::workflow;
+    std::filesystem::path history_file = {};
+    workplace_role_e workplace_role = workplace_role_e::general;
+
+    std::shared_ptr<spdlog::logger> history_logger = {};
+
+    std::vector<chat_history_entry_s> history = {};
+    std::vector<std::uint64_t> last_topic_anchor_ids = {};
+    std::optional<chat_context_state_s> context_state = std::nullopt;
+
+    KnowledgeStorage knowledge;
+
+    bool loaded = false;
 };
 
 struct engine_answer_s {
@@ -80,6 +116,10 @@ public:
 
     [[nodiscard]] bool model_generates() const noexcept;
 
+    [[nodiscard]] assistant_profile_e active_profile() const noexcept;
+
+    [[nodiscard]] bool change_profile(assistant_profile_e profile);
+
     [[nodiscard]] bool change_model(llm::model_e model);
 
     void store_model_cache();
@@ -95,19 +135,40 @@ public:
     void clear_history();
 
 private:
-    void load_history();
+    [[nodiscard]] engine_answer_s ask_workflow(
+            std::string_view user_text,
+            const llm::llama_stream_callback_t &stream_callback);
+
+    [[nodiscard]] engine_answer_s ask_texting(
+            std::string_view user_text,
+            const llm::llama_stream_callback_t &stream_callback);
+
+    void load_context(assistant_context_s &context);
 
     void save_history() const;
 
-    void finalize_interrupted_history_entries();
+    void load_active_profile();
 
-    void rebuild_last_topic_anchor();
+    void save_active_profile() const;
+
+    void finalize_interrupted_history_entries(assistant_context_s &context);
+
+    void rebuild_last_topic_anchor(assistant_context_s &context);
+
+    [[nodiscard]] bool contexts_loaded() const noexcept;
+
+    [[nodiscard]] assistant_context_s &active_context() noexcept;
+
+    [[nodiscard]] const assistant_context_s &active_context() const noexcept;
 
     [[nodiscard]] const chat_history_entry_s *find_history_entry(std::uint64_t id) const noexcept;
 
     [[nodiscard]] std::size_t append_pending_user_entry(std::string_view user_text);
 
     [[nodiscard]] std::string build_system_prompt(std::span<const retrieved_knowledge_s> knowledge) const;
+
+    [[nodiscard]] std::string build_texting_system_prompt(
+            std::span<const retrieved_knowledge_s> knowledge) const;
 
     [[nodiscard]] std::string build_knowledge_base_block(
             std::span<const retrieved_knowledge_s> knowledge,
@@ -155,18 +216,14 @@ private:
     engine_config_s m_config;
 
     std::shared_ptr<spdlog::logger> m_logger;
-    std::shared_ptr<spdlog::logger> m_history_logger;
 
     llm::LlamaServer m_server;
     llm::LlamaClient m_client;
 
-    std::vector<chat_history_entry_s> m_history;
-    std::vector<std::uint64_t> m_last_topic_anchor_ids;
-    std::optional<chat_context_state_s> m_context_state;
+    assistant_context_s m_active_context;
+    assistant_context_s m_inactive_context;
 
-    KnowledgeStorage m_knowledge;
-
-    bool m_loaded = false;
+    std::atomic_bool m_request_active = false;
 };
 
 } // namespace stz::intern

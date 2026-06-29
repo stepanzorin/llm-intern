@@ -1377,14 +1377,6 @@ void strip_balanced_marker_edges(std::string &text, const std::string_view marke
     return result;
 }
 
-[[nodiscard]] bool is_glossary_file(const std::string_view relative_filename) {
-    const auto filename_position = relative_filename.find_last_of('/');
-    const auto filename = filename_position == std::string_view::npos ? relative_filename
-                                                                      : relative_filename.substr(filename_position + 1);
-
-    return filename.starts_with("glossary_");
-}
-
 [[nodiscard]] bool is_markdown_heading(const std::string_view line) {
     auto trimmed = std::string{line};
     util::trim(trimmed);
@@ -1694,27 +1686,174 @@ void flush_knowledge_tag(parsed_knowledge_tags_s &result, std::string tag_name, 
     return std::nullopt;
 }
 
-[[nodiscard]] std::optional<workplace_role_e> role_from_relative_filename(const std::string_view relative_filename) {
-    const auto separator_position = relative_filename.find('/');
+[[nodiscard]] std::vector<std::string_view> split_path_components(const std::string_view relative_filename) {
+    auto result = std::vector<std::string_view>{};
+    auto position = std::size_t{};
 
-    if (separator_position == std::string_view::npos) {
+    while (position <= relative_filename.size()) {
+        const auto separator = relative_filename.find('/', position);
+        const auto component = relative_filename.substr(
+                position,
+                separator == std::string_view::npos ? relative_filename.size() - position : separator - position);
+
+        if (!component.empty()) {
+            result.push_back(component);
+        }
+
+        if (separator == std::string_view::npos) {
+            break;
+        }
+
+        position = separator + 1;
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::optional<workplace_role_e> role_from_relative_filename(
+        const std::string_view relative_filename) {
+    for (const auto component : split_path_components(relative_filename)) {
+        if (const auto role = role_from_directory_name(component); role.has_value()) {
+            return role;
+        }
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<knowledge_source_e> detect_source_type(
+        const knowledge_domain_e domain,
+        const std::string_view relative_filename) noexcept {
+    const auto components = split_path_components(relative_filename);
+
+    if (components.empty()) {
         return std::nullopt;
     }
 
-    return role_from_directory_name(relative_filename.substr(0, separator_position));
+    if (components.front() == "builtin") {
+        return knowledge_source_e::builtin;
+    }
+
+    if (components.front() == "custom") {
+        return knowledge_source_e::custom;
+    }
+
+    /*
+     * Transitional compatibility for the previous workflow layout:
+     * knowledge/<role>/... and custom_*.md. Texting never accepts this form.
+     */
+    if (domain == knowledge_domain_e::workflow) {
+        const auto filename_position = relative_filename.find_last_of('/');
+        const auto filename = filename_position == std::string_view::npos
+                                      ? relative_filename
+                                      : relative_filename.substr(filename_position + 1);
+
+        if (filename.starts_with("custom_") || relative_filename.starts_with("custom/") ||
+            relative_filename.find("/custom/") != std::string_view::npos) {
+            return knowledge_source_e::custom;
+        }
+
+        return knowledge_source_e::builtin;
+    }
+
+    return std::nullopt;
 }
 
-[[nodiscard]] knowledge_source_e detect_source_type(const std::string_view relative_filename) noexcept {
+[[nodiscard]] texting_style_e detect_texting_style(const std::string_view relative_filename,
+                                                   const knowledge_source_e source) noexcept {
+    if (source == knowledge_source_e::custom) {
+        return texting_style_e::any;
+    }
+
+    for (const auto component : split_path_components(relative_filename)) {
+        if (component == "formal") {
+            return texting_style_e::formal;
+        }
+
+        if (component == "neutral") {
+            return texting_style_e::neutral;
+        }
+
+        if (component == "friendly") {
+            return texting_style_e::friendly;
+        }
+    }
+
+    return texting_style_e::neutral;
+}
+
+[[nodiscard]] std::optional<knowledge_document_kind_e> detect_document_kind(
+        const knowledge_domain_e domain,
+        const std::string_view relative_filename) {
     const auto filename_position = relative_filename.find_last_of('/');
     const auto filename = filename_position == std::string_view::npos ? relative_filename
                                                                       : relative_filename.substr(filename_position + 1);
 
-    if (filename.starts_with("custom_") || relative_filename.starts_with("custom/") ||
-        relative_filename.find("/custom/") != std::string_view::npos) {
-        return knowledge_source_e::custom;
+    if (domain == knowledge_domain_e::workflow) {
+        return filename.starts_with("glossary_") ? knowledge_document_kind_e::glossary
+                                                  : knowledge_document_kind_e::workflow;
     }
 
-    return knowledge_source_e::builtin;
+    if (filename.starts_with("script_")) {
+        return knowledge_document_kind_e::texting_script;
+    }
+
+    if (filename.starts_with("structure_")) {
+        return knowledge_document_kind_e::texting_structure;
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] bool looks_like_structure_instruction(const std::string_view line) noexcept {
+    if (line.starts_with("→") || line.starts_with("->") || line.starts_with("- ") ||
+        line.starts_with("* ") || line.starts_with("+ ")) {
+        return true;
+    }
+
+    auto index = std::size_t{};
+
+    while (index < line.size() && std::isdigit(static_cast<unsigned char>(line[index])) != 0) {
+        ++index;
+    }
+
+    return index != 0 && index < line.size() && (line[index] == '.' || line[index] == ')');
+}
+
+[[nodiscard]] knowledge_document_kind_e infer_texting_document_kind(
+        const parsed_knowledge_tags_s &parsed_tags) {
+    auto instruction_lines = std::size_t{};
+    auto prose_lines = std::size_t{};
+
+    for (const auto &[_, tag] : parsed_tags.tags) {
+        auto position = std::size_t{};
+
+        while (position <= tag.content.size()) {
+            const auto line_end = tag.content.find('\n', position);
+            auto line = std::string{std::string_view{tag.content}.substr(
+                    position,
+                    line_end == std::string::npos ? tag.content.size() - position : line_end - position)};
+            util::trim(line);
+
+            if (!line.empty()) {
+                if (looks_like_structure_instruction(line)) {
+                    ++instruction_lines;
+                } else {
+                    ++prose_lines;
+                }
+            }
+
+            if (line_end == std::string::npos) {
+                break;
+            }
+
+            position = line_end + 1;
+        }
+    }
+
+    return instruction_lines != 0 && instruction_lines >= prose_lines
+                   ? knowledge_document_kind_e::texting_structure
+                   : knowledge_document_kind_e::texting_script;
 }
 
 [[nodiscard]] bool is_direct_match(const knowledge_match_e match) noexcept {
@@ -1945,6 +2084,8 @@ struct knowledge_query_parts_s {
             .section_query = query_parts.section,
             .score = score,
             .source = document.source,
+            .kind = document.kind,
+            .texting_style = document.texting_style,
             .role = document.role,
             .match = match,
             .tag_matched_query = tag_matched_query,
@@ -2024,6 +2165,8 @@ void sort_document_candidates(std::vector<knowledge_document_candidate_s> &candi
             .content = std::move(content),
             .score = score,
             .source = document.source,
+            .kind = document.kind,
+            .texting_style = document.texting_style,
             .role = document.role,
             .match = match,
     };
@@ -2038,6 +2181,37 @@ std::string_view to_string(const knowledge_source_e source) noexcept {
     }
 
     return "builtin";
+}
+
+std::string_view to_string(const knowledge_domain_e domain) noexcept {
+    switch (domain) {
+        case knowledge_domain_e::workflow: return "workflow";
+        case knowledge_domain_e::texting: return "texting";
+    }
+
+    return "workflow";
+}
+
+std::string_view to_string(const knowledge_document_kind_e kind) noexcept {
+    switch (kind) {
+        case knowledge_document_kind_e::workflow: return "workflow";
+        case knowledge_document_kind_e::glossary: return "glossary";
+        case knowledge_document_kind_e::texting_script: return "texting_script";
+        case knowledge_document_kind_e::texting_structure: return "texting_structure";
+    }
+
+    return "workflow";
+}
+
+std::string_view to_string(const texting_style_e style) noexcept {
+    switch (style) {
+        case texting_style_e::any: return "any";
+        case texting_style_e::formal: return "formal";
+        case texting_style_e::neutral: return "neutral";
+        case texting_style_e::friendly: return "friendly";
+    }
+
+    return "any";
 }
 
 std::string_view to_string(const workplace_role_e role) noexcept {
@@ -2090,8 +2264,11 @@ workplace_role_e workplace_role_from_string(std::string_view text) {
     throw std::runtime_error{std::format("Unknown workplace role '{}'", text)};
 }
 
-KnowledgeStorage::KnowledgeStorage(std::filesystem::path directory, std::shared_ptr<spdlog::logger> logger)
+KnowledgeStorage::KnowledgeStorage(std::filesystem::path directory,
+                                   const knowledge_domain_e domain,
+                                   std::shared_ptr<spdlog::logger> logger)
     : m_directory{std::move(directory)},
+      m_domain{domain},
       m_logger{std::move(logger)} {
     assert(!m_directory.empty());
     assert(m_logger != nullptr);
@@ -2102,12 +2279,16 @@ void KnowledgeStorage::load() {
     m_glossaries.clear();
 
     if (!std::filesystem::exists(m_directory)) {
-        m_logger->warn("Knowledge directory does not exist: {}", m_directory.string());
+        m_logger->warn("Knowledge directory does not exist for '{}' profile: {}",
+                       to_string(m_domain),
+                       m_directory.string());
         return;
     }
 
     auto total_tags = std::size_t{};
     auto glossary_files = std::size_t{};
+    auto script_files = std::size_t{};
+    auto structure_files = std::size_t{};
 
     for (const auto &entry : std::filesystem::recursive_directory_iterator{m_directory}) {
         if (!entry.is_regular_file() || !is_markdown_file(entry.path())) {
@@ -2116,15 +2297,15 @@ void KnowledgeStorage::load() {
 
         auto relative_path = std::filesystem::relative(entry.path(), m_directory).lexically_normal();
         auto relative_filename = relative_path.generic_string();
-        const auto role = role_from_relative_filename(relative_filename);
+        const auto source = detect_source_type(m_domain, relative_filename);
 
-        if (!role.has_value()) {
-            m_logger->warn("Skipping knowledge file outside role directory: {}", relative_filename);
+        if (!source.has_value()) {
+            m_logger->warn("Skipping '{}' knowledge file outside builtin/custom directory: {}",
+                           to_string(m_domain),
+                           relative_filename);
             continue;
         }
 
-        const auto source = detect_source_type(relative_filename);
-        const auto glossary = is_glossary_file(relative_filename);
         auto content = util::read_text_file(entry.path());
         auto parsed_tags = extract_knowledge_tags(content);
 
@@ -2133,8 +2314,41 @@ void KnowledgeStorage::load() {
             continue;
         }
 
+        auto kind = detect_document_kind(m_domain, relative_filename);
+
+        if (!kind.has_value()) {
+            if (m_domain != knowledge_domain_e::texting) {
+                m_logger->warn("Skipping '{}' knowledge file with unsupported prefix: {}",
+                               to_string(m_domain),
+                               relative_filename);
+                continue;
+            }
+
+            kind = infer_texting_document_kind(parsed_tags);
+
+            m_logger->warn("Texting knowledge file '{}' has no script_/structure_ prefix; inferred kind={}",
+                           relative_filename,
+                           to_string(*kind));
+        }
+
+        const auto role = m_domain == knowledge_domain_e::texting
+                                  ? std::optional{workplace_role_e::general}
+                                  : role_from_relative_filename(relative_filename);
+
+        if (!role.has_value()) {
+            m_logger->warn("Skipping workflow knowledge file outside role directory: {}", relative_filename);
+            continue;
+        }
+
+        const auto glossary = *kind != knowledge_document_kind_e::workflow;
+        const auto texting_style = m_domain == knowledge_domain_e::texting
+                                           ? detect_texting_style(relative_filename, *source)
+                                           : texting_style_e::any;
+
         auto title = extract_title(content, entry.path().filename().string());
-        auto frequent_queries = glossary ? std::vector<std::string>{} : extract_frequent_queries(content);
+        auto frequent_queries = *kind == knowledge_document_kind_e::workflow
+                                        ? extract_frequent_queries(content)
+                                        : std::vector<std::string>{};
 
         auto document = knowledge_document_s{
                 .title = std::move(title),
@@ -2147,7 +2361,9 @@ void KnowledgeStorage::load() {
                 .normalized_frequent_queries = {},
                 .normalized_glossary_aliases = {},
                 .frequent_query_terms = {},
-                .source = source,
+                .source = *source,
+                .kind = *kind,
+                .texting_style = texting_style,
                 .role = *role,
                 .glossary = glossary,
         };
@@ -2157,7 +2373,13 @@ void KnowledgeStorage::load() {
         document.frequent_query_terms = make_frequent_query_terms(document.normalized_frequent_queries);
 
         if (glossary) {
-            ++glossary_files;
+            if (*kind == knowledge_document_kind_e::glossary) {
+                ++glossary_files;
+            } else if (*kind == knowledge_document_kind_e::texting_script) {
+                ++script_files;
+            } else if (*kind == knowledge_document_kind_e::texting_structure) {
+                ++structure_files;
+            }
 
             auto seen_aliases = std::unordered_set<std::string>{};
 
@@ -2203,16 +2425,20 @@ void KnowledgeStorage::load() {
     auto barista_count = std::size_t{};
     auto seller_count = std::size_t{};
     auto beauty_admin_count = std::size_t{};
+    auto builtin_count = std::size_t{};
     auto custom_count = std::size_t{};
     auto documents_without_frequent_queries = std::size_t{};
 
     for (const auto &[_, document] : m_documents) {
-        if (!document.glossary && document.normalized_frequent_queries.empty()) {
+        if (document.kind == knowledge_document_kind_e::workflow &&
+            document.normalized_frequent_queries.empty()) {
             ++documents_without_frequent_queries;
         }
 
         if (document.source == knowledge_source_e::custom) {
             ++custom_count;
+        } else {
+            ++builtin_count;
         }
 
         switch (document.role) {
@@ -2223,22 +2449,26 @@ void KnowledgeStorage::load() {
         }
     }
 
-    m_logger->info("Loaded {} knowledge markdown files, {} cached H2 sections and {} glossary entries from '{}'",
+    m_logger->info("Loaded {} '{}' knowledge markdown files, {} cached H2 sections from '{}'",
                    m_documents.size(),
+                   to_string(m_domain),
                    total_tags,
-                   m_glossaries.size(),
                    m_directory.string());
 
-    m_logger->info("Knowledge map: general={}, barista={}, seller={}, beauty_admin={}, custom={}, glossary_files={}",
+    m_logger->info("Knowledge map: builtin={}, custom={}, general={}, barista={}, seller={}, beauty_admin={}, "
+                   "glossary_files={}, script_files={}, structure_files={}",
+                   builtin_count,
+                   custom_count,
                    general_count,
                    barista_count,
                    seller_count,
                    beauty_admin_count,
-                   custom_count,
-                   glossary_files);
+                   glossary_files,
+                   script_files,
+                   structure_files);
 
     if (documents_without_frequent_queries != 0) {
-        m_logger->warn("{} knowledge files have no 'Частые запросы пользователя' section",
+        m_logger->warn("{} workflow knowledge files have no 'Частые запросы пользователя' section",
                        documents_without_frequent_queries);
     }
 }
@@ -2427,7 +2657,9 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
         auto score = frequent_query_score_s{};
 
         const auto score_alias = [&](const std::string_view normalized_alias) {
-            auto alias_score = score_glossary_heading_terms(terms, make_search_terms(normalized_alias));
+            auto alias_score = m_domain == knowledge_domain_e::texting
+                                       ? score_frequent_query_terms(terms, make_search_terms(normalized_alias))
+                                       : score_glossary_heading_terms(terms, make_search_terms(normalized_alias));
 
             if (normalized_alias == normalized_query || normalized_alias == normalized_effective_query) {
                 alias_score = {
@@ -2480,6 +2712,21 @@ std::vector<retrieved_knowledge_s> KnowledgeStorage::retrieve_glossary(
     std::ranges::sort(results, [](const retrieved_knowledge_s &lhs, const retrieved_knowledge_s &rhs) {
         if (lhs.score != rhs.score) {
             return lhs.score > rhs.score;
+        }
+
+        const auto kind_priority = [](const knowledge_document_kind_e kind) {
+            switch (kind) {
+                case knowledge_document_kind_e::texting_script: return 0;
+                case knowledge_document_kind_e::texting_structure: return 1;
+                case knowledge_document_kind_e::glossary: return 2;
+                case knowledge_document_kind_e::workflow: return 3;
+            }
+
+            return 4;
+        };
+
+        if (kind_priority(lhs.kind) != kind_priority(rhs.kind)) {
+            return kind_priority(lhs.kind) < kind_priority(rhs.kind);
         }
 
         return lhs.filename < rhs.filename;
@@ -2575,7 +2822,18 @@ std::size_t KnowledgeStorage::size() const noexcept { return m_documents.size();
 
 bool KnowledgeStorage::document_matches_options(const knowledge_document_s &document,
                                                 const knowledge_retrieve_options_s &options) noexcept {
+    if (!options.include_builtin && document.source == knowledge_source_e::builtin) {
+        return false;
+    }
+
     if (!options.include_custom && document.source == knowledge_source_e::custom) {
+        return false;
+    }
+
+    if (document.source == knowledge_source_e::builtin &&
+        options.texting_style != texting_style_e::any &&
+        document.texting_style != texting_style_e::any &&
+        document.texting_style != options.texting_style) {
         return false;
     }
 

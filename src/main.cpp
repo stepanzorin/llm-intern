@@ -32,8 +32,12 @@ namespace {
 
     config.engine = engine_config_s{
             .history_file = application_directory / "message_history.json",
+            .texting_history_file = application_directory / "message_history_texting.json",
+            .assistant_profile_state_file = application_directory / "backend/assistant_profile.json",
             .knowledge_directory = application_directory / "knowledge",
+            .initial_profile = assistant_profile_e::workflow,
             .workplace_role = workplace_role_e::barista,
+            .texting_style = texting_style_e::friendly,
             .max_knowledge_documents = 2,
             .max_knowledge_chars_per_document = 3000,
             .min_ranked_knowledge_score = 512,

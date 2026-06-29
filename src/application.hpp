@@ -14,6 +14,7 @@
 #include <spdlog/common.h>
 #include <spdlog/logger.h>
 
+#include "assistant_profile.hpp"
 #include "chat_history.hpp"
 #include "engine.hpp"
 #include "web_server_config.hpp"
@@ -195,6 +196,10 @@ public:
 
     [[nodiscard]] application_operation_result_s restart_model_server();
 
+    [[nodiscard]] assistant_profile_e assistant_profile() const noexcept;
+
+    [[nodiscard]] bool change_assistant_profile(assistant_profile_e profile);
+
     [[nodiscard]] std::vector<chat_history_entry_s> history_snapshot() const;
 
     void clear_history();
@@ -256,6 +261,7 @@ private:
     std::atomic<application_access_state_e> m_access_state = application_access_state_e::inactive;
 
     std::atomic<subscription_plan_e> m_subscription = subscription_plan_e::free;
+    std::atomic<assistant_profile_e> m_assistant_profile = assistant_profile_e::workflow;
 };
 
 } // namespace stz::intern

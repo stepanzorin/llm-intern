@@ -25,6 +25,7 @@ enum class chat_role_e {
 enum class chat_answer_kind_e {
     unknown,
     direct_knowledge,
+    direct_template,
     llm,
     policy_rejection,
 };

@@ -5,13 +5,19 @@
 #include <cassert>
 #include <cctype>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
+#include "request_analyzer.hpp"
+#include "util/file_io.hpp"
 #include "util/string_helpers.hpp"
 #include "util/time.hpp"
 
@@ -24,8 +30,20 @@ namespace {
         throw std::runtime_error{"Engine history file path is empty"};
     }
 
+    if (config.texting_history_file.empty()) {
+        throw std::runtime_error{"Texting history file path is empty"};
+    }
+
+    if (config.assistant_profile_state_file.empty()) {
+        throw std::runtime_error{"Assistant profile state file path is empty"};
+    }
+
     if (config.knowledge_directory.empty()) {
         throw std::runtime_error{"Engine knowledge directory path is empty"};
+    }
+
+    if (config.texting_style == texting_style_e::any) {
+        throw std::runtime_error{"texting_style must be formal, neutral or friendly"};
     }
 
     if (config.max_knowledge_documents != 0 && config.max_knowledge_chars_per_document == 0) {
@@ -62,6 +80,17 @@ namespace {
     return config;
 }
 
+[[nodiscard]] std::filesystem::path workflow_knowledge_directory(
+        const std::filesystem::path &knowledge_directory) {
+    const auto profile_directory = knowledge_directory / "workflow";
+
+    if (std::filesystem::exists(profile_directory)) {
+        return profile_directory;
+    }
+
+    return knowledge_directory;
+}
+
 [[nodiscard]] std::shared_ptr<spdlog::logger> clone_logger(const std::shared_ptr<spdlog::logger> &logger,
                                                            const std::string_view name) {
     assert(logger != nullptr);
@@ -80,6 +109,28 @@ void require_loaded(const bool loaded) {
         std::terminate();
     }
 }
+
+class request_active_guard_s final {
+public:
+    explicit request_active_guard_s(std::atomic_bool &active)
+        : m_active{&active} {
+        auto expected = false;
+
+        if (!m_active->compare_exchange_strong(expected, true)) {
+            throw std::runtime_error{"Another assistant request is already active"};
+        }
+    }
+
+    ~request_active_guard_s() {
+        m_active->store(false);
+    }
+
+    request_active_guard_s(const request_active_guard_s &) = delete;
+    request_active_guard_s &operator=(const request_active_guard_s &) = delete;
+
+private:
+    std::atomic_bool *m_active = nullptr;
+};
 
 [[nodiscard]] std::string markdown_inline_code(const std::string_view text) {
     auto escaped = std::string{text};
@@ -374,6 +425,11 @@ enum class previous_answer_transform_kind_e {
     simplify,
     restructure,
     rewrite,
+    formal,
+    strict,
+    friendly,
+    more_emoji,
+    fewer_emoji,
 };
 
 [[nodiscard]] std::string_view relation_kind_name(const chat_relation_kind_e relation) noexcept {
@@ -394,6 +450,11 @@ enum class previous_answer_transform_kind_e {
         case previous_answer_transform_kind_e::simplify: return "simplify";
         case previous_answer_transform_kind_e::restructure: return "restructure";
         case previous_answer_transform_kind_e::rewrite: return "rewrite";
+        case previous_answer_transform_kind_e::formal: return "formal";
+        case previous_answer_transform_kind_e::strict: return "strict";
+        case previous_answer_transform_kind_e::friendly: return "friendly";
+        case previous_answer_transform_kind_e::more_emoji: return "more_emoji";
+        case previous_answer_transform_kind_e::fewer_emoji: return "fewer_emoji";
     }
 
     return "none";
@@ -776,6 +837,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 
     constexpr auto concise_exact = std::array{
             std::string_view{"кратко"},
+            std::string_view{"кратче"},
             std::string_view{"коротко"},
             std::string_view{"покороче"},
             std::string_view{"короче"},
@@ -786,6 +848,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 
     constexpr auto concise_fragments = std::array{
             std::string_view{"сделай кратко"},
+            std::string_view{"сделай кратче"},
             std::string_view{"сделай коротко"},
             std::string_view{"сделай короче"},
             std::string_view{"составь это кратко"},
@@ -830,10 +893,84 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
         return previous_answer_transform_kind_e::restructure;
     }
 
+    constexpr auto fewer_emoji_fragments = std::array{
+            std::string_view{"меньше эмодзи"},
+            std::string_view{"убери эмодзи"},
+            std::string_view{"без эмодзи"},
+            std::string_view{"меньше смайликов"},
+            std::string_view{"поменьше смайликов"},
+            std::string_view{"убери смайлики"},
+            std::string_view{"без смайликов"},
+    };
+
+    if (contains_any(normalized_text, std::span{fewer_emoji_fragments})) {
+        return previous_answer_transform_kind_e::fewer_emoji;
+    }
+
+    constexpr auto more_emoji_fragments = std::array{
+            std::string_view{"больше эмодзи"},
+            std::string_view{"побольше эмодзи"},
+            std::string_view{"не хватает эмодзи"},
+            std::string_view{"добавь эмодзи"},
+            std::string_view{"больше смайликов"},
+            std::string_view{"побольше смайликов"},
+            std::string_view{"не хватает смайликов"},
+            std::string_view{"добавь смайлики"},
+    };
+
+    if (contains_any(normalized_text, std::span{more_emoji_fragments})) {
+        return previous_answer_transform_kind_e::more_emoji;
+    }
+
+    constexpr auto friendly_fragments = std::array{
+            std::string_view{"дружелюбнее"},
+            std::string_view{"более дружелюб"},
+            std::string_view{"теплее"},
+            std::string_view{"мягче"},
+            std::string_view{"по-доброму"},
+    };
+
+    if (contains_any(normalized_text, std::span{friendly_fragments})) {
+        return previous_answer_transform_kind_e::friendly;
+    }
+
+    constexpr auto strict_fragments = std::array{
+            std::string_view{"строже"},
+            std::string_view{"более строго"},
+            std::string_view{"пожестче"},
+            std::string_view{"пожёстче"},
+    };
+
+    if (contains_any(normalized_text, std::span{strict_fragments})) {
+        return previous_answer_transform_kind_e::strict;
+    }
+
+    constexpr auto formal_fragments = std::array{
+            std::string_view{"формальнее"},
+            std::string_view{"более формально"},
+            std::string_view{"официальнее"},
+            std::string_view{"более официально"},
+            std::string_view{"суше"},
+    };
+
+    if (contains_any(normalized_text, std::span{formal_fragments})) {
+        return previous_answer_transform_kind_e::formal;
+    }
+
     constexpr auto rewrite_fragments = std::array{
             std::string_view{"переформулируй"},
             std::string_view{"перефразируй"},
+            std::string_view{"перефраз"},
+            std::string_view{"перефариз"},
             std::string_view{"перепиши"},
+            std::string_view{"добавь"},
+            std::string_view{"убери"},
+            std::string_view{"удали"},
+            std::string_view{"замени"},
+            std::string_view{"не пиши"},
+            std::string_view{"сделай"},
+            std::string_view{"напиши"},
+            std::string_view{"укажи"},
     };
 
     if (contains_any(normalized_text, std::span{rewrite_fragments})) {
@@ -926,6 +1063,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"какой второй вариант"},
             std::string_view{"второй вариант"},
             std::string_view{"кратко"},
+            std::string_view{"кратче"},
             std::string_view{"коротко"},
             std::string_view{"покороче"},
             std::string_view{"короче"},
@@ -937,6 +1075,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"ответь проще"},
             std::string_view{"напиши проще"},
             std::string_view{"сделай кратко"},
+            std::string_view{"сделай кратче"},
             std::string_view{"сделай коротко"},
             std::string_view{"сделай короче"},
             std::string_view{"без подробностей"},
@@ -944,6 +1083,8 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"одним предложением"},
             std::string_view{"переформулируй"},
             std::string_view{"перефразируй"},
+            std::string_view{"перефраз"},
+            std::string_view{"перефариз"},
             std::string_view{"перепиши"},
             std::string_view{"простыми словами"},
             std::string_view{"составь определение"},
@@ -999,6 +1140,7 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
 
     constexpr auto exact_follow_up_requests = std::array{
             std::string_view{"кратко"},
+            std::string_view{"кратче"},
             std::string_view{"коротко"},
             std::string_view{"покороче"},
             std::string_view{"короче"},
@@ -1023,6 +1165,8 @@ void append_unique_knowledge(std::vector<retrieved_knowledge_s> &target,
             std::string_view{"сократи"},
             std::string_view{"переформулируй"},
             std::string_view{"перефразируй"},
+            std::string_view{"перефраз"},
+            std::string_view{"перефариз"},
             std::string_view{"перепиши"},
             std::string_view{"простыми словами"},
             std::string_view{"составь определение"},
@@ -1293,12 +1437,27 @@ void append_unique_anchor_id(std::vector<std::uint64_t> &ids, const std::uint64_
 
 } // namespace
 
+assistant_context_s::assistant_context_s(const assistant_profile_e profile_value,
+                                         std::filesystem::path history_file_value,
+                                         std::filesystem::path knowledge_directory,
+                                         const workplace_role_e workplace_role_value,
+                                         const std::shared_ptr<spdlog::logger> &logger)
+    : profile{profile_value},
+      history_file{std::move(history_file_value)},
+      workplace_role{workplace_role_value},
+      history_logger{clone_logger(logger, std::format("ChatHistory.{}", to_string(profile_value)))},
+      knowledge{
+              std::move(knowledge_directory),
+              profile_value == assistant_profile_e::workflow ? knowledge_domain_e::workflow
+                                                             : knowledge_domain_e::texting,
+              clone_logger(logger, std::format("KnowledgeStorage.{}", to_string(profile_value))),
+      } {}
+
 LlamaEngine::LlamaEngine(engine_config_s config,
                          llm::llama_server_config_s server_config,
                          const std::shared_ptr<spdlog::logger> &logger)
     : m_config{validate_engine_config(std::move(config))},
       m_logger{clone_logger(logger, "LlamaEngine")},
-      m_history_logger{m_logger->clone("ChatHistory")},
       m_server{
               std::move(server_config),
               m_logger->clone("LlamaServer"),
@@ -1308,38 +1467,48 @@ LlamaEngine::LlamaEngine(engine_config_s config,
               m_config.client,
               m_logger->clone("LlamaClient"),
       },
-      m_knowledge{
-              m_config.knowledge_directory,
-              m_logger->clone("KnowledgeStorage"),
+      m_active_context{
+              assistant_profile_e::workflow,
+              m_config.history_file,
+              workflow_knowledge_directory(m_config.knowledge_directory),
+              m_config.workplace_role,
+              m_logger,
+      },
+      m_inactive_context{
+              assistant_profile_e::texting,
+              m_config.texting_history_file,
+              m_config.knowledge_directory / "texting",
+              workplace_role_e::general,
+              m_logger,
       } {}
 
 void LlamaEngine::load() {
-    assert(!m_loaded);
+    assert(!contexts_loaded());
 
-    if (m_loaded) {
+    if (contexts_loaded()) {
         std::terminate();
     }
 
-    load_history();
-    finalize_interrupted_history_entries();
-
-    m_knowledge.load();
-    rebuild_last_topic_anchor();
-
-    if (m_knowledge.empty()) {
-        m_logger->warn("Knowledge storage is empty");
-    }
-
-    m_loaded = true;
+    load_context(m_active_context);
+    load_context(m_inactive_context);
+    load_active_profile();
 
     m_logger->info("LlamaEngine loaded");
-    m_logger->info("Workplace role: {}", to_string(m_config.workplace_role));
-    m_logger->info("Chat history entries: {}", m_history.size());
-    m_logger->info("Compact model context restored: {}", m_context_state.has_value());
+    m_logger->info("Initial assistant profile: {}", to_string(active_profile()));
+    m_logger->info("Configured texting style: {}", to_string(m_config.texting_style));
+
+    for (const auto *context : {&m_active_context, &m_inactive_context}) {
+        m_logger->info("Assistant context '{}': role={} history_entries={} knowledge_files={} compact_context={}",
+                       to_string(context->profile),
+                       to_string(context->workplace_role),
+                       context->history.size(),
+                       context->knowledge.size(),
+                       context->context_state.has_value());
+    }
 }
 
 void LlamaEngine::start() {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
     assert(!m_server.is_running());
 
@@ -1347,7 +1516,7 @@ void LlamaEngine::start() {
         std::terminate();
     }
 
-    m_logger->info("Starting llama-server");
+    m_logger->info("Starting llama-server for assistant profile '{}'", to_string(active_profile()));
 
     m_server.start();
 
@@ -1361,20 +1530,32 @@ void LlamaEngine::stop() noexcept {
 
 engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                  const llm::llama_stream_callback_t &stream_callback) {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
     if (util::is_blank(user_text)) {
         throw std::runtime_error{"User message is empty"};
     }
 
+    auto request_guard = request_active_guard_s{m_request_active};
+
+    if (active_profile() == assistant_profile_e::texting) {
+        return ask_texting(user_text, stream_callback);
+    }
+
+    return ask_workflow(user_text, stream_callback);
+}
+
+engine_answer_s LlamaEngine::ask_workflow(const std::string_view user_text,
+                                          const llm::llama_stream_callback_t &stream_callback) {
     const auto user_index = append_pending_user_entry(user_text);
 
     save_history();
 
     const auto retrieve_options = knowledge_retrieve_options_s{
-            .workplace_role = m_config.workplace_role,
+            .workplace_role = m_active_context.workplace_role,
 
             .include_general = true,
+            .include_builtin = true,
             .include_custom = true,
 
             .limit = m_config.max_knowledge_documents,
@@ -1394,35 +1575,49 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     const auto procedural_request = looks_like_procedural_request(user_text);
     const auto normalized_user_text = normalize_user_query_for_relation(user_text);
     const auto transform_kind = classify_previous_answer_transform_request(normalized_user_text);
-    const auto transform_request = !m_last_topic_anchor_ids.empty() &&
+    const auto transform_request = !m_active_context.last_topic_anchor_ids.empty() &&
                                    transform_kind != previous_answer_transform_kind_e::none;
 
     const auto retrieve_primary_knowledge = [&](const std::string_view query,
                                                 const bool prefer_documents) {
-        if (prefer_documents) {
-            auto documents = m_knowledge.retrieve(query, retrieve_options);
+        const auto retrieve_from_source = [&](const knowledge_source_e source) {
+            auto options = retrieve_options;
+            options.include_builtin = source == knowledge_source_e::builtin;
+            options.include_custom = source == knowledge_source_e::custom;
 
-            if (!documents.empty()) {
+            if (prefer_documents) {
+                auto documents = m_active_context.knowledge.retrieve(query, options);
+
+                if (!documents.empty()) {
+                    return documents;
+                }
+
+                return m_active_context.knowledge.retrieve_glossary(query, options);
+            }
+
+            auto glossary = m_active_context.knowledge.retrieve_glossary(query, options);
+            auto documents = procedural_request || glossary.empty()
+                                     ? m_active_context.knowledge.retrieve(query, options)
+                                     : std::vector<retrieved_knowledge_s>{};
+
+            if (procedural_request && !documents.empty()) {
                 return documents;
             }
 
-            return m_knowledge.retrieve_glossary(query, retrieve_options);
-        }
+            if (!glossary.empty()) {
+                return glossary;
+            }
 
-        auto glossary = m_knowledge.retrieve_glossary(query, retrieve_options);
-        auto documents = procedural_request || glossary.empty()
-                                 ? m_knowledge.retrieve(query, retrieve_options)
-                                 : std::vector<retrieved_knowledge_s>{};
-
-        if (procedural_request && !documents.empty()) {
             return documents;
+        };
+
+        auto custom = retrieve_from_source(knowledge_source_e::custom);
+
+        if (!custom.empty()) {
+            return custom;
         }
 
-        if (!glossary.empty()) {
-            return glossary;
-        }
-
-        return documents;
+        return retrieve_from_source(knowledge_source_e::builtin);
     };
 
     const auto primary_knowledge = transform_request
@@ -1440,15 +1635,15 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                        to_string(item.match));
     }
 
-    const auto inherited_source_filenames = m_context_state.has_value()
-                                                    ? m_context_state->source_files
-                                                    : make_source_filenames_from_relatives(m_last_topic_anchor_ids);
+    const auto inherited_source_filenames = m_active_context.context_state.has_value()
+                                                    ? m_active_context.context_state->source_files
+                                                    : make_source_filenames_from_relatives(m_active_context.last_topic_anchor_ids);
     const auto current_retrieval_returns_previous_source = knowledge_contains_any_source_filename(
             primary_knowledge,
             inherited_source_filenames);
 
     const auto relation = classify_relation_to_previous_answer(user_text,
-                                                               !m_last_topic_anchor_ids.empty(),
+                                                               !m_active_context.last_topic_anchor_ids.empty(),
                                                                transform_kind,
                                                                current_retrieval_returns_previous_source,
                                                                primary_knowledge);
@@ -1456,7 +1651,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     auto knowledge = primary_knowledge;
 
     if (relation == chat_relation_kind_e::follow_up) {
-        const auto inherited_knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames,
+        const auto inherited_knowledge = m_active_context.knowledge.retrieve_by_filenames(inherited_source_filenames,
                                                                            user_text,
                                                                            retrieve_options);
 
@@ -1504,7 +1699,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
          * already active in the current scenario, which adds legitimate detail
          * without allowing retrieval drift into a neighbouring instruction.
          */
-        knowledge = m_knowledge.retrieve_by_filenames(inherited_source_filenames,
+        knowledge = m_active_context.knowledge.retrieve_by_filenames(inherited_source_filenames,
                                                       user_text,
                                                       retrieve_options);
 
@@ -1545,24 +1740,24 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                                 source_filenames,
                                                 knowledge);
 
-        const auto user_id = m_history[user_index].id;
+        const auto user_id = m_active_context.history[user_index].id;
 
-        m_history[user_index].answer_kind = chat_answer_kind_e::direct_knowledge;
+        m_active_context.history[user_index].answer_kind = chat_answer_kind_e::direct_knowledge;
 
-        m_history[user_index].status = chat_message_status_e::completed;
+        m_active_context.history[user_index].status = chat_message_status_e::completed;
 
         if (relation == chat_relation_kind_e::follow_up) {
-            m_history[user_index].relatives = m_last_topic_anchor_ids;
+            m_active_context.history[user_index].relatives = m_active_context.last_topic_anchor_ids;
         } else {
-            m_history[user_index].relatives.clear();
+            m_active_context.history[user_index].relatives.clear();
         }
 
-        auto assistant_relatives = m_history[user_index].relatives;
+        auto assistant_relatives = m_active_context.history[user_index].relatives;
         assistant_relatives.push_back(user_id);
 
-        const auto assistant_id = make_next_chat_entry_id(m_history);
+        const auto assistant_id = make_next_chat_entry_id(m_active_context.history);
 
-        m_history.push_back(chat_history_entry_s{
+        m_active_context.history.push_back(chat_history_entry_s{
                 .id = assistant_id,
 
                 .answer_kind = chat_answer_kind_e::direct_knowledge,
@@ -1586,8 +1781,8 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                 .context_state = context_state,
         });
 
-        m_context_state = std::move(context_state);
-        m_last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
+        m_active_context.context_state = std::move(context_state);
+        m_active_context.last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
 
         save_history();
 
@@ -1621,7 +1816,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
      * Только теперь требуется llama-server.
      */
     if (!m_server.is_running()) {
-        m_history[user_index].status = chat_message_status_e::failed;
+        m_active_context.history[user_index].status = chat_message_status_e::failed;
 
         save_history();
 
@@ -1629,19 +1824,19 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                  "llama-server is not ready"};
     }
 
-    m_history[user_index].answer_kind = chat_answer_kind_e::llm;
+    m_active_context.history[user_index].answer_kind = chat_answer_kind_e::llm;
 
     if (relation != chat_relation_kind_e::standalone) {
-        m_history[user_index].relatives = m_last_topic_anchor_ids;
+        m_active_context.history[user_index].relatives = m_active_context.last_topic_anchor_ids;
     } else {
-        m_history[user_index].relatives.clear();
+        m_active_context.history[user_index].relatives.clear();
     }
 
     m_logger->info("LLM request relation: {} transform={} previous_anchor_ids={} relatives_used={} same_source={}",
                    relation_kind_name(relation),
                    transform_kind_name(transform_kind),
-                   m_last_topic_anchor_ids.size(),
-                   m_history[user_index].relatives.size(),
+                   m_active_context.last_topic_anchor_ids.size(),
+                   m_active_context.history[user_index].relatives.size(),
                    current_retrieval_returns_previous_source);
 
     save_history();
@@ -1650,13 +1845,13 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
 
     try {
         const auto request_messages = build_request_messages(
-                m_history[user_index],
+                m_active_context.history[user_index],
                 knowledge,
                 relation == chat_relation_kind_e::transform_previous_answer);
 
         response = m_client.complete_chat(request_messages, stream_callback);
     } catch (...) {
-        m_history[user_index].status = chat_message_status_e::failed;
+        m_active_context.history[user_index].status = chat_message_status_e::failed;
 
         save_history();
 
@@ -1664,7 +1859,7 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     }
 
     if (response.status == llm::llama_completion_status_e::cancelled) {
-        m_history[user_index].status = chat_message_status_e::cancelled;
+        m_active_context.history[user_index].status = chat_message_status_e::cancelled;
 
         save_history();
 
@@ -1698,17 +1893,17 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
                                             source_filenames,
                                             knowledge);
 
-    const auto user_id = m_history[user_index].id;
+    const auto user_id = m_active_context.history[user_index].id;
 
-    auto assistant_relatives = m_history[user_index].relatives;
+    auto assistant_relatives = m_active_context.history[user_index].relatives;
 
     assistant_relatives.push_back(user_id);
 
-    m_history[user_index].status = chat_message_status_e::completed;
+    m_active_context.history[user_index].status = chat_message_status_e::completed;
 
-    const auto assistant_id = make_next_chat_entry_id(m_history);
+    const auto assistant_id = make_next_chat_entry_id(m_active_context.history);
 
-    m_history.push_back(chat_history_entry_s{
+    m_active_context.history.push_back(chat_history_entry_s{
             .id = assistant_id,
 
             .answer_kind = chat_answer_kind_e::llm,
@@ -1732,8 +1927,8 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
             .context_state = context_state,
     });
 
-    m_context_state = std::move(context_state);
-    m_last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
+    m_active_context.context_state = std::move(context_state);
+    m_active_context.last_topic_anchor_ids = make_topic_anchor_ids(std::move(assistant_relatives), user_id, assistant_id);
 
     save_history();
 
@@ -1744,26 +1939,328 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     };
 }
 
+engine_answer_s LlamaEngine::ask_texting(const std::string_view user_text,
+                                         const llm::llama_stream_callback_t &stream_callback) {
+    const auto user_index = append_pending_user_entry(user_text);
+    save_history();
+
+    const auto analysis = TextingRequestAnalyzer::analyze(user_text);
+
+    m_logger->info("Texting request analyzed: intent={} query='{}' retrieval_queries={} semantic_parts={} "
+                   "configured_style={} client_message={} negative_feedback={} placeholders={}",
+                   to_string(analysis.intent),
+                   analysis.retrieval_query,
+                   analysis.retrieval_queries.size(),
+                   analysis.semantic_parts.size(),
+                   to_string(m_config.texting_style),
+                   analysis.contains_client_message,
+                   analysis.negative_feedback,
+                   analysis.placeholder_values.size());
+
+    for (const auto &part : analysis.semantic_parts) {
+        m_logger->debug("Texting semantic part: '{}'", part);
+    }
+
+    for (const auto &query : analysis.retrieval_queries) {
+        m_logger->debug("Texting retrieval query: '{}'", query);
+    }
+
+    const auto normalized_user_text = normalize_user_query_for_relation(user_text);
+    const auto transform_kind = classify_previous_answer_transform_request(normalized_user_text);
+    const auto transform_previous_answer = !m_active_context.last_topic_anchor_ids.empty() &&
+                                           (transform_kind != previous_answer_transform_kind_e::none ||
+                                            TextingRequestAnalyzer::looks_like_follow_up_edit(user_text));
+
+    auto knowledge = std::vector<retrieved_knowledge_s>{};
+
+    if (!transform_previous_answer && !analysis.retrieval_query.empty()) {
+        const auto retrieve_from_source = [&](const knowledge_source_e source,
+                                              const texting_style_e style) {
+            const auto options = knowledge_retrieve_options_s{
+                    .workplace_role = workplace_role_e::general,
+                    .include_general = true,
+                    .include_builtin = source == knowledge_source_e::builtin,
+                    .include_custom = source == knowledge_source_e::custom,
+                    .texting_style = style,
+                    .limit = 1,
+                    .max_chars_per_document = m_config.max_knowledge_chars_per_document,
+                    .min_ranked_score = m_config.min_ranked_knowledge_score,
+            };
+
+            auto best = std::vector<retrieved_knowledge_s>{};
+
+            for (const auto &query : analysis.retrieval_queries) {
+                auto candidate = m_active_context.knowledge.retrieve_glossary(query, options);
+
+                if (candidate.empty()) {
+                    continue;
+                }
+
+                const auto candidate_is_better = [&] {
+                    if (best.empty()) {
+                        return true;
+                    }
+
+                    if (candidate.front().score != best.front().score) {
+                        return candidate.front().score > best.front().score;
+                    }
+
+                    return candidate.front().kind == knowledge_document_kind_e::texting_script &&
+                           best.front().kind != knowledge_document_kind_e::texting_script;
+                }();
+
+                if (candidate_is_better) {
+                    best = std::move(candidate);
+                }
+
+                if (best.front().match == knowledge_match_e::exact_glossary_heading &&
+                    best.front().kind == knowledge_document_kind_e::texting_script) {
+                    break;
+                }
+            }
+
+            return best;
+        };
+
+        knowledge = retrieve_from_source(knowledge_source_e::custom, texting_style_e::any);
+
+        if (knowledge.empty()) {
+            knowledge = retrieve_from_source(knowledge_source_e::builtin, m_config.texting_style);
+        }
+    }
+
+    for (const auto &item : knowledge) {
+        m_logger->info("Retrieved texting knowledge: {} section='{}' kind={} style={} score={} source={} match={}",
+                       item.filename,
+                       item.tag_name,
+                       to_string(item.kind),
+                       to_string(item.texting_style),
+                       item.score,
+                       to_string(item.source),
+                       to_string(item.match));
+    }
+
+    auto rendered_script = std::string{};
+    const auto direct_script_candidate = !transform_previous_answer && !analysis.has_style_instruction &&
+                                         knowledge.size() == 1 &&
+                                         knowledge.front().kind == knowledge_document_kind_e::texting_script;
+
+    if (direct_script_candidate) {
+        rendered_script = TextingRequestAnalyzer::instantiate_script(
+                knowledge.front().content,
+                analysis.placeholder_values);
+    }
+
+    const auto direct_script = direct_script_candidate;
+
+    if (direct_script) {
+        auto answer_body = std::move(rendered_script);
+        util::trim(answer_body);
+
+        if (answer_body.empty()) {
+            answer_body = "Не удалось заполнить выбранный скрипт.";
+        }
+
+        auto source_filenames = make_source_filenames(knowledge);
+        auto context_state = make_context_state(false,
+                                                false,
+                                                user_text,
+                                                answer_body,
+                                                source_filenames,
+                                                knowledge);
+        const auto user_id = m_active_context.history[user_index].id;
+
+        m_active_context.history[user_index].answer_kind = chat_answer_kind_e::direct_template;
+        m_active_context.history[user_index].status = chat_message_status_e::completed;
+        m_active_context.history[user_index].relatives.clear();
+
+        auto assistant_relatives = std::vector<std::uint64_t>{user_id};
+        const auto assistant_id = make_next_chat_entry_id(m_active_context.history);
+
+        m_active_context.history.push_back(chat_history_entry_s{
+                .id = assistant_id,
+                .answer_kind = chat_answer_kind_e::direct_template,
+                .status = chat_message_status_e::completed,
+                .user = std::nullopt,
+                .assistant = chat_visible_message_s{
+                        .content = answer_body,
+                        .created_at = util::make_local_timestamp(),
+                        .model_content = make_chat_model_content(answer_body, chat_role_e::assistant),
+                        .name = "AI-бот",
+                },
+                .source_files = source_filenames,
+                .relatives = assistant_relatives,
+                .context_state = context_state,
+        });
+
+        m_active_context.context_state = std::move(context_state);
+        m_active_context.last_topic_anchor_ids = make_topic_anchor_ids(
+                std::move(assistant_relatives),
+                user_id,
+                assistant_id);
+        save_history();
+
+        m_logger->info("Texting script rendered without LLM: file={} section='{}'",
+                       knowledge.front().filename,
+                       knowledge.front().tag_name);
+
+        return engine_answer_s{
+                .status = chat_message_status_e::completed,
+                .content = std::move(answer_body),
+        };
+    }
+
+    if (!m_server.is_running()) {
+        m_active_context.history[user_index].status = chat_message_status_e::failed;
+        save_history();
+        throw std::runtime_error{"Cannot generate texting answer: llama-server is not ready"};
+    }
+
+    m_active_context.history[user_index].answer_kind = chat_answer_kind_e::llm;
+
+    if (transform_previous_answer) {
+        m_active_context.history[user_index].relatives = m_active_context.last_topic_anchor_ids;
+    } else {
+        m_active_context.history[user_index].relatives.clear();
+    }
+
+    save_history();
+
+    auto response = llm::llama_client_response_s{};
+
+    try {
+        const auto request_messages = build_request_messages(
+                m_active_context.history[user_index],
+                knowledge,
+                transform_previous_answer);
+        response = m_client.complete_chat(request_messages, stream_callback);
+    } catch (...) {
+        m_active_context.history[user_index].status = chat_message_status_e::failed;
+        save_history();
+        throw;
+    }
+
+    if (response.status == llm::llama_completion_status_e::cancelled) {
+        m_active_context.history[user_index].status = chat_message_status_e::cancelled;
+        save_history();
+
+        return engine_answer_s{
+                .status = chat_message_status_e::cancelled,
+                .content = std::move(response.content),
+        };
+    }
+
+    auto source_filenames = transform_previous_answer
+                                    ? make_source_filenames_from_relatives(m_active_context.last_topic_anchor_ids)
+                                    : make_source_filenames(knowledge);
+    limit_source_files(source_filenames, m_config.max_context_source_files);
+
+    auto answer_body = remove_generated_service_lines(response.content);
+    util::trim(answer_body);
+
+    if (answer_body.empty()) {
+        answer_body = "Не удалось получить содержательный ответ от модели.";
+    }
+
+    auto context_state = make_context_state(transform_previous_answer,
+                                            false,
+                                            user_text,
+                                            answer_body,
+                                            source_filenames,
+                                            knowledge);
+    const auto user_id = m_active_context.history[user_index].id;
+    auto assistant_relatives = m_active_context.history[user_index].relatives;
+    assistant_relatives.push_back(user_id);
+
+    m_active_context.history[user_index].status = chat_message_status_e::completed;
+
+    const auto assistant_id = make_next_chat_entry_id(m_active_context.history);
+
+    m_active_context.history.push_back(chat_history_entry_s{
+            .id = assistant_id,
+            .answer_kind = chat_answer_kind_e::llm,
+            .status = chat_message_status_e::completed,
+            .user = std::nullopt,
+            .assistant = chat_visible_message_s{
+                    .content = answer_body,
+                    .created_at = util::make_local_timestamp(),
+                    .model_content = make_chat_model_content(answer_body, chat_role_e::assistant),
+                    .name = "AI-бот",
+            },
+            .source_files = source_filenames,
+            .relatives = assistant_relatives,
+            .context_state = context_state,
+    });
+
+    m_active_context.context_state = std::move(context_state);
+    m_active_context.last_topic_anchor_ids = make_topic_anchor_ids(
+            std::move(assistant_relatives),
+            user_id,
+            assistant_id);
+    save_history();
+
+    m_logger->info("Texting answer generated: transform={} knowledge_files={}",
+                   transform_previous_answer,
+                   knowledge.size());
+
+    return engine_answer_s{
+            .status = chat_message_status_e::completed,
+            .content = std::move(answer_body),
+    };
+}
+
 void LlamaEngine::stop_generating() noexcept { m_server.stop_generating(); }
 
 bool LlamaEngine::is_running() const noexcept { return m_server.is_running(); }
 
-bool LlamaEngine::model_generates() const noexcept { return m_server.model_generates(); }
+bool LlamaEngine::model_generates() const noexcept {
+    return m_request_active.load() || m_server.model_generates();
+}
+
+assistant_profile_e LlamaEngine::active_profile() const noexcept {
+    return m_active_context.profile;
+}
+
+bool LlamaEngine::change_profile(const assistant_profile_e profile) {
+    require_loaded(contexts_loaded());
+
+    if (profile == m_active_context.profile) {
+        return false;
+    }
+
+    if (m_request_active.load() || m_server.model_generates()) {
+        throw std::runtime_error{"Cannot change assistant profile while a request is active"};
+    }
+
+    if (m_inactive_context.profile != profile) {
+        throw std::runtime_error{std::format("Assistant profile '{}' is not loaded", to_string(profile))};
+    }
+
+    const auto previous_profile = m_active_context.profile;
+    std::swap(m_active_context, m_inactive_context);
+    save_active_profile();
+
+    m_logger->info("Assistant profile switched: {} -> {}",
+                   to_string(previous_profile),
+                   to_string(m_active_context.profile));
+
+    return true;
+}
 
 bool LlamaEngine::change_model(const llm::model_e model) {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
     return m_server.change_model(model);
 }
 
 void LlamaEngine::store_model_cache() {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
     m_server.store_model_cache();
 }
 
 void LlamaEngine::load_model_cache() {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
     m_server.load_model_cache();
 }
@@ -1774,43 +2271,95 @@ llm::llama_server_state_info_s LlamaEngine::server_state() const { return m_serv
 
 std::span<const chat_history_entry_s> LlamaEngine::history() const noexcept {
     return {
-            m_history.data(),
-            m_history.size(),
+            m_active_context.history.data(),
+            m_active_context.history.size(),
     };
 }
 
 void LlamaEngine::clear_history() {
-    require_loaded(m_loaded);
+    require_loaded(contexts_loaded());
 
-    if (m_server.model_generates()) {
-        throw std::runtime_error{"Cannot clear chat history while "
-                                 "the model is generating an answer"};
+    if (m_request_active.load() || m_server.model_generates()) {
+        throw std::runtime_error{"Cannot clear chat history while an assistant request is active"};
     }
 
-    m_history.clear();
-    m_last_topic_anchor_ids.clear();
-    m_context_state.reset();
+    m_active_context.history.clear();
+    m_active_context.last_topic_anchor_ids.clear();
+    m_active_context.context_state.reset();
 
     save_history();
 
-    m_logger->info("Chat history and model context were cleared");
+    m_logger->info("Chat history and model context were cleared for assistant profile '{}'",
+                   to_string(active_profile()));
 }
 
-void LlamaEngine::load_history() { m_history = load_chat_history(m_config.history_file, m_history_logger); }
+void LlamaEngine::load_context(assistant_context_s &context) {
+    assert(!context.loaded);
 
-void LlamaEngine::save_history() const { save_chat_history(m_config.history_file, m_history); }
+    context.history = load_chat_history(context.history_file, context.history_logger);
+    finalize_interrupted_history_entries(context);
+    context.knowledge.load();
+    rebuild_last_topic_anchor(context);
+    context.loaded = true;
 
-void LlamaEngine::finalize_interrupted_history_entries() {
+    if (context.knowledge.empty()) {
+        m_logger->warn("Knowledge storage is empty for assistant profile '{}'", to_string(context.profile));
+    }
+}
+
+void LlamaEngine::save_history() const {
+    save_chat_history(m_active_context.history_file, m_active_context.history);
+}
+
+void LlamaEngine::load_active_profile() {
+    auto selected_profile = m_config.initial_profile;
+
+    if (std::filesystem::exists(m_config.assistant_profile_state_file)) {
+        try {
+            const auto root = nlohmann::json::parse(
+                    util::read_text_file(m_config.assistant_profile_state_file));
+            selected_profile = assistant_profile_from_string(root.value("profile", "workflow"));
+        } catch (const std::exception &error) {
+            m_logger->warn("Failed to restore assistant profile from '{}': {}. Using '{}'.",
+                           m_config.assistant_profile_state_file.string(),
+                           error.what(),
+                           to_string(selected_profile));
+        }
+    }
+
+    if (selected_profile != m_active_context.profile) {
+        if (selected_profile != m_inactive_context.profile) {
+            throw std::runtime_error{std::format("Assistant profile '{}' was not loaded",
+                                                 to_string(selected_profile))};
+        }
+
+        std::swap(m_active_context, m_inactive_context);
+    }
+
+    save_active_profile();
+}
+
+void LlamaEngine::save_active_profile() const {
+    const auto output = nlohmann::json{
+            {"version", 1},
+            {"profile", std::string{to_string(m_active_context.profile)}},
+    };
+
+    util::write_text_file_atomic(
+            m_config.assistant_profile_state_file,
+            output.dump(2, ' ', false));
+}
+
+void LlamaEngine::finalize_interrupted_history_entries(assistant_context_s &context) {
     auto changed = false;
     auto interrupted_count = std::size_t{};
 
-    for (auto &entry : m_history) {
+    for (auto &entry : context.history) {
         if (entry.status != chat_message_status_e::pending) {
             continue;
         }
 
         entry.status = chat_message_status_e::failed;
-
         changed = true;
         ++interrupted_count;
     }
@@ -1819,35 +2368,38 @@ void LlamaEngine::finalize_interrupted_history_entries() {
         return;
     }
 
-    save_history();
+    save_chat_history(context.history_file, context.history);
 
-    m_history_logger->warn("{} interrupted pending chat entries "
-                           "were marked as failed",
-                           interrupted_count);
+    context.history_logger->warn("{} interrupted pending chat entries were marked as failed",
+                                 interrupted_count);
 }
 
-void LlamaEngine::rebuild_last_topic_anchor() {
-    m_last_topic_anchor_ids.clear();
-    m_context_state.reset();
+void LlamaEngine::rebuild_last_topic_anchor(assistant_context_s &context) {
+    context.last_topic_anchor_ids.clear();
+    context.context_state.reset();
 
-    for (auto index = m_history.size(); index > 0; --index) {
-        const auto &entry = m_history[index - 1];
+    const auto find_entry = [&](const std::uint64_t id) -> const chat_history_entry_s * {
+        const auto it = std::ranges::find(context.history, id, &chat_history_entry_s::id);
+        return it == context.history.end() ? nullptr : &*it;
+    };
+
+    for (auto index = context.history.size(); index > 0; --index) {
+        const auto &entry = context.history[index - 1];
 
         if (!is_completed_assistant_entry(entry)) {
             continue;
         }
 
-        m_last_topic_anchor_ids = {entry.id};
+        context.last_topic_anchor_ids = {entry.id};
 
         if (entry.context_state.has_value()) {
-            m_context_state = entry.context_state;
+            context.context_state = entry.context_state;
 
-            if (m_context_state->source_files.empty()) {
-                m_context_state->source_files = entry.source_files;
+            if (context.context_state->source_files.empty()) {
+                context.context_state->source_files = entry.source_files;
             }
 
-            limit_source_files(m_context_state->source_files, m_config.max_context_source_files);
-
+            limit_source_files(context.context_state->source_files, m_config.max_context_source_files);
             return;
         }
 
@@ -1863,7 +2415,7 @@ void LlamaEngine::rebuild_last_topic_anchor() {
         auto related_user_messages = std::vector<std::string>{};
 
         for (const auto relative_id : entry.relatives) {
-            const auto *relative = find_history_entry(relative_id);
+            const auto *relative = find_entry(relative_id);
 
             if (relative == nullptr || !relative->user.has_value() ||
                 util::is_blank(relative->user->model_content)) {
@@ -1876,7 +2428,7 @@ void LlamaEngine::rebuild_last_topic_anchor() {
 
         if (related_user_messages.empty()) {
             for (auto previous = index - 1; previous > 0; --previous) {
-                const auto &candidate = m_history[previous - 1];
+                const auto &candidate = context.history[previous - 1];
 
                 if (candidate.status != chat_message_status_e::completed || !candidate.user.has_value() ||
                     util::is_blank(candidate.user->model_content)) {
@@ -1897,23 +2449,30 @@ void LlamaEngine::rebuild_last_topic_anchor() {
                                                   ? related_user_messages.size() - m_config.max_context_user_messages
                                                   : std::size_t{1};
 
-                state.recent_user_messages.assign(related_user_messages.begin() +
-                                                          static_cast<std::ptrdiff_t>(first_recent),
-                                                  related_user_messages.end());
+                state.recent_user_messages.assign(
+                        related_user_messages.begin() + static_cast<std::ptrdiff_t>(first_recent),
+                        related_user_messages.end());
             }
         }
 
-        m_context_state = std::move(state);
-
+        context.context_state = std::move(state);
         return;
     }
 }
 
+bool LlamaEngine::contexts_loaded() const noexcept {
+    return m_active_context.loaded && m_inactive_context.loaded;
+}
+
+assistant_context_s &LlamaEngine::active_context() noexcept { return m_active_context; }
+
+const assistant_context_s &LlamaEngine::active_context() const noexcept { return m_active_context; }
+
 const chat_history_entry_s *LlamaEngine::find_history_entry(const std::uint64_t id) const noexcept {
-    const auto it = std::ranges::find_if(m_history,
+    const auto it = std::ranges::find_if(m_active_context.history,
                                          [id](const chat_history_entry_s &entry) noexcept { return entry.id == id; });
 
-    if (it == m_history.end()) {
+    if (it == m_active_context.history.end()) {
         return nullptr;
     }
 
@@ -1921,9 +2480,9 @@ const chat_history_entry_s *LlamaEngine::find_history_entry(const std::uint64_t 
 }
 
 std::size_t LlamaEngine::append_pending_user_entry(const std::string_view user_text) {
-    const auto id = make_next_chat_entry_id(m_history);
+    const auto id = make_next_chat_entry_id(m_active_context.history);
 
-    m_history.push_back(chat_history_entry_s{
+    m_active_context.history.push_back(chat_history_entry_s{
             .id = id,
 
             .answer_kind = chat_answer_kind_e::unknown,
@@ -1946,11 +2505,11 @@ std::size_t LlamaEngine::append_pending_user_entry(const std::string_view user_t
             .relatives = {},
     });
 
-    return m_history.size() - 1;
+    return m_active_context.history.size() - 1;
 }
 
 std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_knowledge_s> knowledge) const {
-    const auto role_str = to_string(m_config.workplace_role);
+    const auto role_str = to_string(m_active_context.workplace_role);
     const auto glossary_mode = has_glossary_knowledge(knowledge);
 
     auto prompt = std::format(
@@ -1981,6 +2540,53 @@ std::string LlamaEngine::build_system_prompt(const std::span<const retrieved_kno
     return prompt;
 }
 
+std::string LlamaEngine::build_texting_system_prompt(
+        const std::span<const retrieved_knowledge_s> knowledge) const {
+    auto prompt = std::string{
+            "Ты составляешь готовый ответ клиенту от лица организации. Отвечай только текстом сообщения, который "
+            "можно сразу скопировать и отправить клиенту. Не добавляй анализ, пояснения, заголовки, комментарии, "
+            "названия файлов или блок источников.\n"
+            "Пиши по-русски, уважительно и без грубости. Не используй мат даже при грубом сообщении клиента. "
+            "Не обвиняй клиента или сотрудника и не спорь с эмоциями клиента. Если клиент недоволен, спокойно "
+            "признай проблему или переживания, извинись за неприятную ситуацию и предложи только тот следующий шаг, "
+            "который разрешён предоставленным шаблоном или структурой.\n"
+            "Не выдумывай скидки, возвраты, компенсации, сроки, обещания, причины произошедшего или правила компании. "
+            "Сохраняй естественные переносы строк.\n"};
+
+    switch (m_config.texting_style) {
+        case texting_style_e::formal:
+            prompt += "Стиль организации: формальный и сдержанный. Не используй эмодзи и разговорные формулировки.\n";
+            break;
+        case texting_style_e::neutral:
+            prompt += "Стиль организации: нейтральный и доброжелательный. Эмодзи используй редко и только если они уже есть в шаблоне.\n";
+            break;
+        case texting_style_e::friendly:
+            prompt += "Стиль организации: тёплый и дружелюбный. Допустимы уместные эмодзи, но без перегруженности.\n";
+            break;
+        case texting_style_e::any: std::unreachable();
+    }
+
+    if (knowledge.empty()) {
+        prompt += "Подходящий корпоративный шаблон не найден. Составь осторожный нейтральный ответ без выдуманных "
+                  "обязательств и фактов.";
+        return prompt;
+    }
+
+    const auto kind = knowledge.front().kind;
+
+    if (kind == knowledge_document_kind_e::texting_script) {
+        prompt += "В <knowledge_base> дан готовый корпоративный скрипт. Сохрани его факты и смысл, заполни только "
+                  "данные, явно указанные пользователем, и измени формулировки лишь настолько, насколько просит "
+                  "пользователь.\n";
+    } else {
+        prompt += "В <knowledge_base> дана обязательная структура ответа. Соблюдай порядок и смысл всех пунктов, "
+                  "но сформулируй их как одно естественное сообщение клиенту.\n";
+    }
+
+    prompt += build_knowledge_base_block(knowledge, m_config.max_prompt_knowledge_chars_per_document);
+    return prompt;
+}
+
 std::string LlamaEngine::build_knowledge_base_block(
         const std::span<const retrieved_knowledge_s> knowledge,
         const std::size_t max_chars_per_document) const {
@@ -1991,7 +2597,17 @@ std::string LlamaEngine::build_knowledge_base_block(
     for (const auto &item : knowledge) {
         const auto content = truncate_utf8(item.content, max_chars_per_document);
 
-        if (is_glossary_match(item.match)) {
+        if (item.kind == knowledge_document_kind_e::texting_script) {
+            prompt += std::format("<script name=\"{}\" scenario=\"{}\">\n{}\n</script>\n",
+                                  item.filename,
+                                  item.title,
+                                  content);
+        } else if (item.kind == knowledge_document_kind_e::texting_structure) {
+            prompt += std::format("<response_structure name=\"{}\" scenario=\"{}\">\n{}\n</response_structure>\n",
+                                  item.filename,
+                                  item.title,
+                                  content);
+        } else if (is_glossary_match(item.match)) {
             prompt += std::format("<glossary name=\"{}\" term=\"{}\">\n{}\n</glossary>\n",
                                   item.filename,
                                   item.title,
@@ -2012,13 +2628,13 @@ std::string LlamaEngine::build_knowledge_base_block(
 }
 
 std::string LlamaEngine::build_context_state_prompt() const {
-    assert(m_context_state.has_value());
+    assert(m_active_context.context_state.has_value());
 
-    if (!m_context_state.has_value()) {
+    if (!m_active_context.context_state.has_value()) {
         std::terminate();
     }
 
-    const auto &state = *m_context_state;
+    const auto &state = *m_active_context.context_state;
     auto prompt = std::string{
             "Текущий запрос продолжает предыдущую тему. Используй компактное состояние ниже только для связи "
             "реплик; рабочие правила бери из <knowledge_base>, если он есть.\n<context_state>\n"};
@@ -2061,20 +2677,28 @@ std::string LlamaEngine::build_previous_answer_transform_prompt(
     assert(transform_kind != previous_answer_transform_kind_e::none);
 
     auto prompt = std::string{};
+    const auto texting = active_profile() == assistant_profile_e::texting;
 
     switch (transform_kind) {
         case previous_answer_transform_kind_e::concise:
-            prompt = "Сократи предыдущий ответ заметно. Убери повторы, пояснения и второстепенные варианты. "
-                     "Оставь только разные основные действия. Не добавляй новые факты, условия или рекомендации.\n";
+            prompt = texting
+                             ? "Сделай сообщение заметно короче. Сохрани уважительный тон, основную мысль и "
+                               "предложенный следующий шаг. Не добавляй новые факты или обещания.\n"
+                             : "Сократи предыдущий ответ заметно. Убери повторы, пояснения и второстепенные варианты. "
+                               "Оставь только разные основные действия. Не добавляй новые факты, условия или рекомендации.\n";
             break;
 
         case previous_answer_transform_kind_e::expand:
-            prompt = "Раскрой предыдущий ответ заметно подробнее. Добавляй только конкретные действия и пояснения, "
-                     "которые прямо следуют из <knowledge_base>. Не выдумывай внутренние правила. Если пользователь "
-                     "одновременно просит «только основные действия», не сокращай ответ до двух фраз: сохрани только "
-                     "основные шаги, но сделай каждый шаг конкретным — что сообщить, что согласовать, что изменить и "
-                     "что подтвердить. Для рабочего сценария обычно дай 3–6 последовательных пунктов. Не повторяй одну "
-                     "мысль разными словами.\n";
+            prompt = texting
+                             ? "Сделай сообщение подробнее, но сохрани его как готовый ответ клиенту. Раскрывай только "
+                               "мысли из предыдущего ответа и <knowledge_base>; не добавляй новые причины, обещания, "
+                               "компенсации или правила.\n"
+                             : "Раскрой предыдущий ответ заметно подробнее. Добавляй только конкретные действия и пояснения, "
+                               "которые прямо следуют из <knowledge_base>. Не выдумывай внутренние правила. Если пользователь "
+                               "одновременно просит «только основные действия», не сокращай ответ до двух фраз: сохрани только "
+                               "основные шаги, но сделай каждый шаг конкретным — что сообщить, что согласовать, что изменить и "
+                               "что подтвердить. Для рабочего сценария обычно дай 3–6 последовательных пунктов. Не повторяй одну "
+                               "мысль разными словами.\n";
             break;
 
         case previous_answer_transform_kind_e::simplify:
@@ -2083,8 +2707,8 @@ std::string LlamaEngine::build_previous_answer_transform_prompt(
             break;
 
         case previous_answer_transform_kind_e::restructure:
-            prompt = "Измени только структуру предыдущего ответа в соответствии с запросом пользователя: список, "
-                     "чеклист или определение. Сохрани содержание и не добавляй новые факты или правила.\n";
+            prompt = "Измени только структуру предыдущего ответа в соответствии с запросом пользователя. Сохрани "
+                     "содержание и не добавляй новые факты или правила.\n";
             break;
 
         case previous_answer_transform_kind_e::rewrite:
@@ -2092,15 +2716,42 @@ std::string LlamaEngine::build_previous_answer_transform_prompt(
                      "и не добавляй новые факты, условия, правила или рекомендации.\n";
             break;
 
+        case previous_answer_transform_kind_e::formal:
+            prompt = "Сделай предыдущий ответ более формальным и официальным. Убери разговорные обороты и лишние "
+                     "эмодзи, но сохрани вежливость, смысл и все факты.\n";
+            break;
+
+        case previous_answer_transform_kind_e::strict:
+            prompt = "Сделай предыдущий ответ строже и увереннее, но не грубо и не обвиняюще. Не добавляй угрозы, "
+                     "санкции, правила или обещания, которых не было в исходном ответе.\n";
+            break;
+
+        case previous_answer_transform_kind_e::friendly:
+            prompt = "Сделай предыдущий ответ теплее и дружелюбнее. Сохрани профессиональность, факты и смысл; не "
+                     "добавляй лишних обещаний.\n";
+            break;
+
+        case previous_answer_transform_kind_e::more_emoji:
+            prompt = "Добавь уместные эмодзи в предыдущий ответ. Не ставь эмодзи после каждого предложения и не "
+                     "меняй факты, смысл или предложенный следующий шаг.\n";
+            break;
+
+        case previous_answer_transform_kind_e::fewer_emoji:
+            prompt = "Убери большинство или все эмодзи из предыдущего ответа в соответствии с запросом пользователя. "
+                     "Не меняй факты, смысл и тон сообщения.\n";
+            break;
+
         case previous_answer_transform_kind_e::none:
             assert(false);
             std::terminate();
     }
 
-    prompt += "Не добавляй блок источников: приложение добавит его само.\n";
+    prompt += texting
+                      ? "Верни только готовый текст сообщения клиенту, без заголовка и пояснений.\n"
+                      : "Не добавляй блок источников: приложение добавит его само.\n";
 
-    if (m_context_state.has_value() && !m_context_state->topic.empty()) {
-        prompt += std::format("Тема диалога: {}\n", m_context_state->topic);
+    if (m_active_context.context_state.has_value() && !m_active_context.context_state->topic.empty()) {
+        prompt += std::format("Тема диалога: {}\n", m_active_context.context_state->topic);
     }
 
     prompt += std::format("<previous_answer>\n{}\n</previous_answer>\n", previous_answer);
@@ -2108,8 +2759,8 @@ std::string LlamaEngine::build_previous_answer_transform_prompt(
     if (transform_kind == previous_answer_transform_kind_e::expand) {
         if (knowledge.empty()) {
             prompt += "<knowledge_base>\n</knowledge_base>\n"
-                      "Дополнительных материалов нет. В этом случае раскрой только уже названные действия и прямо "
-                      "не добавляй новые правила.\n";
+                      "Дополнительных материалов нет. В этом случае раскрой только уже названные действия и не "
+                      "добавляй новые правила.\n";
         } else {
             prompt += build_knowledge_base_block(
                     knowledge,
@@ -2124,12 +2775,12 @@ std::string LlamaEngine::build_previous_answer_transform_prompt(
 }
 
 std::string LlamaEngine::build_contextual_retrieval_query(const std::string_view user_text) const {
-    if (!m_context_state.has_value()) {
+    if (!m_active_context.context_state.has_value()) {
         return std::string{user_text};
     }
 
     auto query = std::string{user_text};
-    const auto &state = *m_context_state;
+    const auto &state = *m_active_context.context_state;
 
     if (!state.topic.empty()) {
         query += '\n';
@@ -2150,28 +2801,34 @@ std::string LlamaEngine::build_contextual_retrieval_query(const std::string_view
 }
 
 std::string LlamaEngine::previous_answer_for_transform() const {
-    for (auto it = m_last_topic_anchor_ids.rbegin(); it != m_last_topic_anchor_ids.rend(); ++it) {
+    for (auto it = m_active_context.last_topic_anchor_ids.rbegin(); it != m_active_context.last_topic_anchor_ids.rend(); ++it) {
         const auto *entry = find_history_entry(*it);
 
         if (entry == nullptr || !is_completed_assistant_entry(*entry)) {
             continue;
         }
 
-        return truncate_utf8(remove_generated_service_lines(entry->assistant->model_content),
-                             m_config.max_transform_answer_chars);
+        const auto &answer = active_profile() == assistant_profile_e::texting
+                                     ? entry->assistant->content
+                                     : entry->assistant->model_content;
+
+        return truncate_utf8(remove_generated_service_lines(answer), m_config.max_transform_answer_chars);
     }
 
-    for (auto it = m_history.rbegin(); it != m_history.rend(); ++it) {
+    for (auto it = m_active_context.history.rbegin(); it != m_active_context.history.rend(); ++it) {
         if (!is_completed_assistant_entry(*it)) {
             continue;
         }
 
-        return truncate_utf8(remove_generated_service_lines(it->assistant->model_content),
-                             m_config.max_transform_answer_chars);
+        const auto &answer = active_profile() == assistant_profile_e::texting
+                                     ? it->assistant->content
+                                     : it->assistant->model_content;
+
+        return truncate_utf8(remove_generated_service_lines(answer), m_config.max_transform_answer_chars);
     }
 
-    if (m_context_state.has_value()) {
-        return truncate_utf8(m_context_state->last_answer_excerpt, m_config.max_transform_answer_chars);
+    if (m_active_context.context_state.has_value()) {
+        return truncate_utf8(m_active_context.context_state->last_answer_excerpt, m_config.max_transform_answer_chars);
     }
 
     return {};
@@ -2184,7 +2841,7 @@ chat_context_state_s LlamaEngine::make_context_state(
         const std::string_view answer_body,
         const std::span<const std::string> source_filenames,
         const std::span<const retrieved_knowledge_s> knowledge) const {
-    auto state = follow_up && m_context_state.has_value() ? *m_context_state : chat_context_state_s{};
+    auto state = follow_up && m_active_context.context_state.has_value() ? *m_active_context.context_state : chat_context_state_s{};
     const auto compact_user_text = truncate_utf8(make_chat_model_content(user_text, chat_role_e::user),
                                                  m_config.max_context_chars_per_user_message);
 
@@ -2251,26 +2908,41 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
         std::terminate();
     }
 
+    const auto texting = active_profile() == assistant_profile_e::texting;
+    const auto &user_message = *current_user_entry.user;
+    const auto &user_content = texting ? user_message.content : user_message.model_content;
+
     auto messages = std::vector<chat_message_s>{};
 
     const auto transform_kind = transform_previous_answer
                                         ? classify_previous_answer_transform_request(
-                                                  normalize_user_query_for_relation(
-                                                          current_user_entry.user->model_content))
+                                                  normalize_user_query_for_relation(user_content))
                                         : previous_answer_transform_kind_e::none;
+
+    auto system_prompt = std::string{};
+
+    if (texting) {
+        system_prompt = transform_previous_answer
+                                ? "Ты редактируешь предыдущий готовый ответ клиенту. Выполни только указанное "
+                                  "пользователем преобразование. Не добавляй новые факты, обещания, скидки, "
+                                  "компенсации или внутренние правила. Верни только готовый текст сообщения клиенту."
+                                : build_texting_system_prompt(knowledge);
+    } else if (transform_kind == previous_answer_transform_kind_e::expand) {
+        system_prompt = "Ты дополняешь предыдущий ответ AI-помощника стажёра. Используй только предыдущий "
+                        "ответ и предоставленную базу знаний. Дай более подробный, конкретный и полезный "
+                        "ответ по-русски, не выдумывая внутренние правила.";
+    } else if (transform_previous_answer) {
+        system_prompt = "Ты редактируешь предыдущий ответ AI-помощника стажёра. Выполни только "
+                        "указанное пользователем преобразование и не добавляй новое содержание. "
+                        "Отвечай по-русски.";
+    } else {
+        system_prompt = build_system_prompt(knowledge);
+    }
 
     messages.push_back(chat_message_s{
             .role = chat_role_e::system,
             .name = "system",
-            .content = transform_kind == previous_answer_transform_kind_e::expand
-                               ? "Ты дополняешь предыдущий ответ AI-помощника стажёра. Используй только предыдущий "
-                                 "ответ и предоставленную базу знаний. Дай более подробный, конкретный и полезный "
-                                 "ответ по-русски, не выдумывая внутренние правила."
-                               : transform_previous_answer
-                                         ? "Ты редактируешь предыдущий ответ AI-помощника стажёра. Выполни только "
-                                           "указанное пользователем преобразование и не добавляй новое содержание. "
-                                           "Отвечай по-русски."
-                                         : build_system_prompt(knowledge),
+            .content = std::move(system_prompt),
             .created_at = util::make_local_timestamp(),
             .source_files = {},
     });
@@ -2279,13 +2951,11 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
         messages.push_back(chat_message_s{
                 .role = chat_role_e::system,
                 .name = "previous_answer_transform",
-                .content = build_previous_answer_transform_prompt(
-                        current_user_entry.user->model_content,
-                        knowledge),
+                .content = build_previous_answer_transform_prompt(user_content, knowledge),
                 .created_at = util::make_local_timestamp(),
                 .source_files = {},
         });
-    } else if (!current_user_entry.relatives.empty() && m_context_state.has_value()) {
+    } else if (!texting && !current_user_entry.relatives.empty() && m_active_context.context_state.has_value()) {
         messages.push_back(chat_message_s{
                 .role = chat_role_e::system,
                 .name = "context_state",
@@ -2295,8 +2965,7 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
         });
     }
 
-    if (!transform_previous_answer &&
-        looks_like_errors_or_risks_request(current_user_entry.user->model_content)) {
+    if (!texting && !transform_previous_answer && looks_like_errors_or_risks_request(user_message.model_content)) {
         messages.push_back(chat_message_s{
                 .role = chat_role_e::system,
                 .name = "errors_and_risks_mode",
@@ -2312,9 +2981,9 @@ std::vector<chat_message_s> LlamaEngine::build_request_messages(
 
     messages.push_back(chat_message_s{
             .role = chat_role_e::user,
-            .name = current_user_entry.user->name,
-            .content = current_user_entry.user->model_content,
-            .created_at = current_user_entry.user->created_at,
+            .name = user_message.name,
+            .content = user_content,
+            .created_at = user_message.created_at,
             .source_files = {},
     });
 

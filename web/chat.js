@@ -12,8 +12,10 @@ document.addEventListener(
             );
         }
 
-        const welcomeMessageText =
-            "Какой у Вас вопрос?";
+        const welcomeMessages = Object.freeze({
+            workflow: "Какой у Вас рабочий вопрос?",
+            texting: "Пришлите сообщение клиента или опишите ситуацию — подготовлю ответ.",
+        });
 
         const form =
             document.getElementById("chat-form");
@@ -36,6 +38,18 @@ document.addEventListener(
         const composerMenu =
             document.getElementById("composer-menu");
 
+        const assistantProfileMenu =
+            document.getElementById("assistant-profile-menu");
+
+        const assistantProfileLabel =
+            document.getElementById("assistant-profile-label");
+
+        const assistantProfileButtons =
+            document.querySelectorAll("[data-assistant-profile]");
+
+        const cheatsheetProfileGrids =
+            document.querySelectorAll("[data-cheatsheets-profile]");
+
         const cheatsheetsModal =
             document.getElementById("cheatsheets-modal");
 
@@ -50,6 +64,9 @@ document.addEventListener(
             stopButton === null ||
             generatingMessage === null ||
             composerMenu === null ||
+            assistantProfileMenu === null ||
+            assistantProfileLabel === null ||
+            assistantProfileButtons.length === 0 ||
             cheatsheetsModal === null
         ) {
             throw new Error(
@@ -89,11 +106,183 @@ document.addEventListener(
         let generationCancelledByUser = false;
         let previousServerGenerating = false;
         let statePollTimer = null;
+        let activeAssistantProfile = "workflow";
+        let historyLoaded = false;
+        let profileChangeInFlight = false;
+        let profileState = new Map();
 
         function setTextForAll(nodes, text) {
             nodes.forEach((node) => {
                 node.textContent = text;
             });
+        }
+
+        function profileLabel(profile) {
+            return profile === "texting"
+                ? "Ответы клиентам"
+                : "Рабочие инструкции";
+        }
+
+        function profileAvailable(profile) {
+            return profileState.get(profile)?.available !== false;
+        }
+
+        function closeAssistantProfileMenu() {
+            assistantProfileMenu.open = false;
+        }
+
+        function updateProfileControlsDisabled() {
+            assistantProfileButtons.forEach((button) => {
+                const profile = button.dataset.assistantProfile;
+                const available = profileAvailable(profile);
+
+                button.dataset.available = available ? "true" : "false";
+                button.disabled =
+                    generationActive ||
+                    requestInFlight ||
+                    restartRequestInFlight ||
+                    profileChangeInFlight ||
+                    !available;
+
+                if (!available) {
+                    button.title = "Доступно только на тарифе PREMIUM";
+                } else {
+                    button.removeAttribute("title");
+                }
+            });
+
+            if (
+                generationActive ||
+                requestInFlight ||
+                restartRequestInFlight ||
+                profileChangeInFlight
+            ) {
+                closeAssistantProfileMenu();
+            }
+        }
+
+        function applyAssistantProfile(profile) {
+            const normalizedProfile =
+                profile === "texting"
+                    ? "texting"
+                    : "workflow";
+
+            const changed =
+                activeAssistantProfile !== normalizedProfile;
+
+            activeAssistantProfile = normalizedProfile;
+            document.documentElement.dataset.assistantProfile =
+                normalizedProfile;
+            assistantProfileLabel.textContent =
+                profileLabel(normalizedProfile);
+
+            assistantProfileButtons.forEach((button) => {
+                button.setAttribute(
+                    "aria-pressed",
+                    button.dataset.assistantProfile === normalizedProfile
+                        ? "true"
+                        : "false"
+                );
+            });
+
+            cheatsheetProfileGrids.forEach((grid) => {
+                grid.hidden =
+                    grid.dataset.cheatsheetsProfile !== normalizedProfile;
+            });
+
+            input.placeholder =
+                normalizedProfile === "texting"
+                    ? "Вставьте сообщение клиента или опишите ситуацию..."
+                    : "Напишите рабочий вопрос...";
+
+            updateProfileControlsDisabled();
+
+            return changed;
+        }
+
+        async function parseJsonResponse(response) {
+            let payload = {};
+
+            try {
+                payload = await response.json();
+            } catch {
+                payload = {};
+            }
+
+            if (!response.ok) {
+                const error = new Error(
+                    payload?.error?.message ??
+                    "Не удалось выполнить запрос."
+                );
+
+                error.payload = payload;
+                throw error;
+            }
+
+            return payload;
+        }
+
+        async function changeAssistantProfile(profile) {
+            if (
+                profile === activeAssistantProfile ||
+                !profileAvailable(profile) ||
+                generationActive ||
+                requestInFlight ||
+                restartRequestInFlight ||
+                profileChangeInFlight
+            ) {
+                closeAssistantProfileMenu();
+                return;
+            }
+
+            profileChangeInFlight = true;
+            updateProfileControlsDisabled();
+
+            try {
+                const response = await fetch(
+                    "/api/chat/profile",
+                    {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({
+                            profile,
+                        }),
+                    }
+                );
+
+                const payload =
+                    await parseJsonResponse(response);
+
+                applyAssistantProfile(
+                    payload?.assistant_profile
+                );
+
+                clearRenderedMessages();
+                await loadHistory();
+                await refreshApplicationState();
+                focusInputWithoutScroll();
+            } catch (error) {
+                if (handleApiRedirect(error)) {
+                    return;
+                }
+
+                console.error(
+                    "Failed to change assistant profile:",
+                    error
+                );
+
+                appendAssistantMessage(
+                    error?.message ??
+                    "Не удалось переключить режим бота.",
+                    "failed"
+                );
+            } finally {
+                profileChangeInFlight = false;
+                closeAssistantProfileMenu();
+                updateProfileControlsDisabled();
+            }
         }
 
         function scrollMessagesToBottom() {
@@ -572,7 +761,10 @@ document.addEventListener(
             const contentElement =
                 document.createElement("div");
 
-            if (role === "assistant") {
+            if (
+                role === "assistant" &&
+                activeAssistantProfile !== "texting"
+            ) {
                 contentElement.className =
                     "message__content markdown";
 
@@ -583,6 +775,12 @@ document.addEventListener(
             } else {
                 contentElement.className =
                     "message__content message__content--plain";
+
+                if (role === "assistant") {
+                    contentElement.classList.add(
+                        "message__content--client-reply"
+                    );
+                }
 
                 contentElement.textContent =
                     content;
@@ -626,7 +824,7 @@ document.addEventListener(
             }
 
             appendAssistantMessage(
-                welcomeMessageText,
+                welcomeMessages[activeAssistantProfile],
                 "completed",
                 {
                     kind: "welcome",
@@ -727,6 +925,7 @@ document.addEventListener(
             } = {}
         ) {
             generationActive = active;
+            updateProfileControlsDisabled();
 
             sendButton.hidden = active;
             stopButton.hidden = !active;
@@ -934,6 +1133,8 @@ document.addEventListener(
             renderHistory(
                 historyMessages
             );
+
+            historyLoaded = true;
         }
 
         function updateApplicationState(state) {
@@ -942,6 +1143,38 @@ document.addEventListener(
 
             const modelGenerating =
                 state?.model_generates === true;
+
+            if (Array.isArray(state?.assistant_profiles)) {
+                profileState = new Map(
+                    state.assistant_profiles
+                        .filter((profile) => {
+                            return typeof profile?.id === "string";
+                        })
+                        .map((profile) => {
+                            return [profile.id, profile];
+                        })
+                );
+            }
+
+            const profileChanged = applyAssistantProfile(
+                state?.assistant_profile
+            );
+
+            if (
+                profileChanged &&
+                historyLoaded &&
+                !requestInFlight &&
+                !profileChangeInFlight
+            ) {
+                clearRenderedMessages();
+
+                loadHistory().catch((error) => {
+                    console.error(
+                        "Failed to load profile history:",
+                        error
+                    );
+                });
+            }
 
             setServerVisualState({
                 running: serverRunning,
@@ -1028,11 +1261,16 @@ document.addEventListener(
         }
 
         async function submitMessage() {
+            const rawUserMessage =
+                input.value;
+
             const userMessage =
-                input.value.trim();
+                activeAssistantProfile === "texting"
+                    ? rawUserMessage
+                    : rawUserMessage.trim();
 
             if (
-                userMessage.length === 0 ||
+                userMessage.trim().length === 0 ||
                 generationActive ||
                 requestInFlight ||
                 restartRequestInFlight
@@ -1335,6 +1573,10 @@ document.addEventListener(
                     return;
                 }
 
+                if (event.shiftKey) {
+                    return;
+                }
+
                 event.preventDefault();
 
                 submitMessage();
@@ -1361,6 +1603,15 @@ document.addEventListener(
                     )
                 ) {
                     closeComposerMenu();
+                }
+
+                if (
+                    assistantProfileMenu.open &&
+                    !assistantProfileMenu.contains(
+                        event.target
+                    )
+                ) {
+                    closeAssistantProfileMenu();
                 }
             }
         );
@@ -1394,7 +1645,11 @@ document.addEventListener(
                     "click",
                     () => {
                         input.value =
-                            button.textContent.trim();
+                            button.textContent
+                                .split("\n")
+                                .map((line) => line.trim())
+                                .join("\n")
+                                .trim();
 
                         resizeInput();
                         closeCheatsheets();
@@ -1415,6 +1670,17 @@ document.addEventListener(
                 );
             });
 
+        assistantProfileButtons.forEach((button) => {
+            button.addEventListener(
+                "click",
+                () => {
+                    changeAssistantProfile(
+                        button.dataset.assistantProfile
+                    );
+                }
+            );
+        });
+
         document.addEventListener(
             "keydown",
             (event) => {
@@ -1423,6 +1689,7 @@ document.addEventListener(
                 }
 
                 closeComposerMenu();
+                closeAssistantProfileMenu();
 
                 if (!cheatsheetsModal.hidden) {
                     closeCheatsheets();
@@ -1438,6 +1705,8 @@ document.addEventListener(
                 focus: false,
             }
         );
+
+        await refreshApplicationState();
 
         try {
             await loadHistory();
@@ -1455,8 +1724,6 @@ document.addEventListener(
                 "failed"
             );
         }
-
-        await refreshApplicationState();
 
         if (!generationActive && !input.disabled) {
             focusInputWithoutScroll();
