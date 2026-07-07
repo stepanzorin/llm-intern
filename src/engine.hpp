@@ -20,6 +20,7 @@
 #include "knowledge_storage.hpp"
 #include "llm/llama_client.hpp"
 #include "llm/llama_server.hpp"
+#include "organization_config.hpp"
 
 namespace stz::intern {
 
@@ -31,6 +32,7 @@ struct engine_config_s {
     std::filesystem::path history_file = "message_history.json";
     std::filesystem::path texting_history_file = "message_history_texting.json";
     std::filesystem::path assistant_profile_state_file = "backend/assistant_profile.json";
+    std::filesystem::path organization_config_file = "organization_config.json";
     std::filesystem::path knowledge_directory = "knowledge";
 
     assistant_profile_e initial_profile = assistant_profile_e::workflow;
@@ -40,6 +42,26 @@ struct engine_config_s {
     std::size_t max_knowledge_documents = 2;
     std::size_t max_knowledge_chars_per_document = 2500;
     std::size_t min_ranked_knowledge_score = 512;
+
+    // Texting uses two bounded LLM passes when a script is found:
+    // scenario selection and a surgical edit plan. The final response is assembled on CPU
+    // from the original corporate script, so untouched text stays byte-for-byte unchanged.
+    std::size_t max_texting_selected_scripts = 3;
+    std::size_t max_texting_selector_input_chars = 1200;
+    std::int32_t max_texting_selector_tokens = 96;
+
+    std::size_t max_texting_adaptation_input_chars = 1200;
+    std::size_t max_texting_adaptation_chars_per_script = 1200;
+    std::size_t max_texting_script_edits = 5;
+    std::int32_t max_texting_adaptation_tokens = 256;
+
+    std::int32_t max_texting_answer_tokens = 448;
+    std::size_t max_texting_prompt_chars_per_script = 1800;
+
+    double texting_formal_temperature = 0.20;
+    double texting_neutral_temperature = 0.30;
+    double texting_friendly_temperature = 0.45;
+    double texting_top_p = 0.90;
 
     // The full retrieved text remains available for direct answers; only the LLM prompt is shortened.
     std::size_t max_prompt_knowledge_chars_per_document = 1200;
@@ -143,6 +165,13 @@ private:
             std::string_view user_text,
             const llm::llama_stream_callback_t &stream_callback);
 
+    [[nodiscard]] std::optional<engine_answer_s> try_answer_from_organization_config(
+            std::string_view user_text);
+
+    void load_organization_config();
+
+    void reload_organization_config_if_changed();
+
     void load_context(assistant_context_s &context);
 
     void save_history() const;
@@ -166,6 +195,9 @@ private:
     [[nodiscard]] std::size_t append_pending_user_entry(std::string_view user_text);
 
     [[nodiscard]] std::string build_system_prompt(std::span<const retrieved_knowledge_s> knowledge) const;
+
+    [[nodiscard]] std::string build_texting_adaptation_system_prompt(
+            std::span<const retrieved_knowledge_s> knowledge) const;
 
     [[nodiscard]] std::string build_texting_system_prompt(
             std::span<const retrieved_knowledge_s> knowledge) const;
@@ -222,6 +254,9 @@ private:
 
     assistant_context_s m_active_context;
     assistant_context_s m_inactive_context;
+
+    organization_config_s m_organization_config = {};
+    std::optional<std::filesystem::file_time_type> m_organization_config_write_time = std::nullopt;
 
     std::atomic_bool m_request_active = false;
 };

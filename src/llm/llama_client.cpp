@@ -413,8 +413,10 @@ LlamaClient::LlamaClient(LlamaServer &server,
     validate_client_config(m_config);
 }
 
-llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_message_s> messages,
-                                                   const llama_stream_callback_t &stream_callback) {
+llama_client_response_s LlamaClient::complete_chat(
+        const std::span<const chat_message_s> messages,
+        const llama_stream_callback_t &stream_callback,
+        const llama_completion_options_s &options) {
     assert(!messages.empty());
     assert(m_server != nullptr);
 
@@ -422,7 +424,23 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
         throw std::runtime_error{"llama-server is not ready"};
     }
 
-    const auto desired_response_tokens = estimate_response_max_tokens(messages, m_config.max_tokens);
+    const auto temperature = options.temperature.value_or(m_config.temperature);
+    const auto top_p = options.top_p.value_or(m_config.top_p);
+    const auto configured_max_tokens = options.max_tokens.value_or(m_config.max_tokens);
+
+    if (temperature < 0.0) {
+        throw std::runtime_error{"LLM completion temperature must not be negative"};
+    }
+
+    if (top_p <= 0.0 || top_p > 1.0) {
+        throw std::runtime_error{"LLM completion top_p must be in range (0, 1]"};
+    }
+
+    if (configured_max_tokens <= 0) {
+        throw std::runtime_error{"LLM completion max_tokens must be greater than zero"};
+    }
+
+    const auto desired_response_tokens = estimate_response_max_tokens(messages, configured_max_tokens);
     const auto estimated_prompt_tokens = estimate_prompt_tokens(messages);
     const auto available_response_tokens =
             m_config.context_window - m_config.context_safety_margin - estimated_prompt_tokens;
@@ -468,8 +486,8 @@ llama_client_response_s LlamaClient::complete_chat(const std::span<const chat_me
             {"model", request_model_name(state)},
             {"messages", make_chat_messages_json(messages)},
             {"stream", true},
-            {"temperature", m_config.temperature},
-            {"top_p", m_config.top_p},
+            {"temperature", temperature},
+            {"top_p", top_p},
             {"max_tokens", response_max_tokens},
             {"cache_prompt", m_config.cache_prompt},
             {"id_slot", session->slot_id()},

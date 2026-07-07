@@ -650,7 +650,7 @@ void WebServer::handle_get_application_state(const httplib::Request &, httplib::
      * was downgraded. Switching back here also fixes refresh/reopen scenarios.
      */
     if (!texting_available && assistant_profile == assistant_profile_e::texting && !state.model_generates) {
-        m_application.change_assistant_profile(assistant_profile_e::workflow);
+        std::ignore = m_application.change_assistant_profile(assistant_profile_e::workflow);
         assistant_profile = assistant_profile_e::workflow;
     }
 

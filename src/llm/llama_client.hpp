@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -39,6 +40,12 @@ struct llama_client_config_s {
     std::chrono::seconds write_timeout = std::chrono::seconds{600};
 };
 
+struct llama_completion_options_s {
+    std::optional<double> temperature = std::nullopt;
+    std::optional<double> top_p = std::nullopt;
+    std::optional<std::int32_t> max_tokens = std::nullopt;
+};
+
 struct llama_client_response_s {
     llama_completion_status_e status = llama_completion_status_e::completed;
     std::string content = {};
@@ -50,8 +57,10 @@ class LlamaClient final {
 public:
     LlamaClient(LlamaServer &server, const llama_client_config_s &config, std::shared_ptr<spdlog::logger> logger);
 
-    [[nodiscard]] llama_client_response_s complete_chat(std::span<const chat_message_s> messages,
-                                                        const llama_stream_callback_t &stream_callback = {});
+    [[nodiscard]] llama_client_response_s complete_chat(
+            std::span<const chat_message_s> messages,
+            const llama_stream_callback_t &stream_callback = {},
+            const llama_completion_options_s &options = {});
 
 private:
     LlamaServer *m_server = nullptr;

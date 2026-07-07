@@ -34,6 +34,7 @@ namespace {
             .history_file = application_directory / "message_history.json",
             .texting_history_file = application_directory / "message_history_texting.json",
             .assistant_profile_state_file = application_directory / "backend/assistant_profile.json",
+            .organization_config_file = application_directory / "organization_config.json",
             .knowledge_directory = application_directory / "knowledge",
             .initial_profile = assistant_profile_e::workflow,
             .workplace_role = workplace_role_e::barista,

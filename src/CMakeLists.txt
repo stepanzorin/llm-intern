@@ -13,6 +13,8 @@ target_sources(
         engine.hpp
         knowledge_storage.cpp
         knowledge_storage.hpp
+        organization_config.cpp
+        organization_config.hpp
         platform.hpp
         web_server.cpp
         web_server.hpp
