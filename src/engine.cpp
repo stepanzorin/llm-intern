@@ -1,5 +1,7 @@
 #include "engine.hpp"
 
+#include "emojis.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -76,6 +78,23 @@ namespace {
 
     if (config.max_texting_selector_tokens <= 0) {
         throw std::runtime_error{"max_texting_selector_tokens must be positive"};
+    }
+
+    if (config.max_texting_normalizer_small_context_chars == 0 ||
+        config.max_texting_normalizer_medium_context_chars == 0 ||
+        config.max_texting_normalizer_large_context_chars == 0) {
+        throw std::runtime_error{"texting normalizer context sizes must be positive"};
+    }
+
+    if (config.max_texting_normalizer_small_context_chars >
+            config.max_texting_normalizer_medium_context_chars ||
+        config.max_texting_normalizer_medium_context_chars >
+            config.max_texting_normalizer_large_context_chars) {
+        throw std::runtime_error{"texting normalizer context sizes must be ordered"};
+    }
+
+    if (config.max_texting_normalizer_tokens <= 0) {
+        throw std::runtime_error{"max_texting_normalizer_tokens must be positive"};
     }
 
     if (config.max_texting_adaptation_input_chars == 0) {
@@ -391,6 +410,87 @@ struct texting_issue_analysis_s {
             "Если клиент недоволен результатом услуги, первый запрос: \"Клиент не остался доволен\". "
             "Если названы возврат денег, другой мастер, запись, отмена, стоимость, длительность, опоздание "
             "или перенос, добавь только явно указанные ситуации. Ничего не додумывай.";
+}
+
+[[nodiscard]] std::string build_texting_organization_query_normalizer_prompt() {
+    return
+            "Сокращай любой вопрос от клиентов в сфере услуг до ~2-3 ключевых слов,"
+            "описывая саму суть контекста.Своди всё к способам или услугам."
+            "Примеры:1)\"каким способом я могу записаться на гель-лак?\"→способы записи;"
+            "2)\"как я могу оплатить услугу в вашем салоне?\"→способы оплаты;"
+            "3)\"Принимает ли у вас подолог?\"→услуга подолога;"
+            "4)\"Парикмахерские услуги есть?\"→услуга парикмахера;"
+            "5)\"Мне нужна женская стрижка на свадьбу.Подскажите,оказываете ли вы подобные услуги?\"→женская стрижка;"
+            "6)\"Хотела бы привести свои бровки в порядок!\"→услуги брови;"
+            "7)\"Проблемы с ногтями на ногах, поможете?\"→услуга подолога;"
+            "8)\"Сколько примерно пешком от метро до вашего салона?\"→сколько идти от метро до салона."
+            "Верни только сокращённую фразу без JSON, Markdown и пояснений.";
+}
+
+[[nodiscard]] std::size_t choose_texting_normalizer_input_chars(
+        const engine_config_s &config,
+        const std::string_view user_text) noexcept {
+    const auto text_size = compact_whitespace(user_text).size();
+    const auto windows = std::array{
+            config.max_texting_normalizer_small_context_chars,
+            config.max_texting_normalizer_medium_context_chars,
+            config.max_texting_normalizer_large_context_chars,
+    };
+
+    for (const auto window : windows) {
+        if (text_size <= window) {
+            return window;
+        }
+    }
+
+    return config.max_texting_normalizer_large_context_chars;
+}
+
+[[nodiscard]] std::optional<std::string> parse_texting_organization_normalized_query(
+        const std::string_view response) {
+    if (response.empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        const auto value = nlohmann::json::parse(response, nullptr, true, true);
+
+        if (value.is_string()) {
+            auto query = compact_whitespace(value.get<std::string>());
+
+            if (query.empty() || query.size() > 160) {
+                return std::nullopt;
+            }
+
+            return query;
+        }
+
+        if (!value.is_object()) {
+            return std::nullopt;
+        }
+
+        const auto it = value.find("query");
+
+        if (it == value.end() || !it->is_string()) {
+            return std::nullopt;
+        }
+
+        auto query = compact_whitespace(it->get<std::string>());
+
+        if (query.empty() || query.size() > 240) {
+            return std::nullopt;
+        }
+
+        return query;
+    } catch (...) {
+        auto query = compact_whitespace(response);
+
+        if (query.empty() || query.size() > 160 || query.contains('{') || query.contains('}')) {
+            return std::nullopt;
+        }
+
+        return query;
+    }
 }
 
 [[nodiscard]] std::vector<std::string> parse_texting_selector_queries(
@@ -1263,6 +1363,35 @@ void ensure_texting_reply_greeting(std::string &answer,
            normalized.contains("сообщить клиент");
 }
 
+void apply_organization_texting_style_tokens(std::string &answer,
+                                              const texting_style_e style) {
+    constexpr auto prefix = std::string_view{"[[friendly:"};
+    constexpr auto suffix = std::string_view{"]]"};
+
+    auto search_from = std::size_t{0};
+
+    while (true) {
+        const auto begin = answer.find(prefix, search_from);
+
+        if (begin == std::string::npos) {
+            break;
+        }
+
+        const auto value_begin = begin + prefix.size();
+        const auto end = answer.find(suffix, value_begin);
+
+        if (end == std::string::npos) {
+            break;
+        }
+
+        const auto replacement = style == texting_style_e::friendly
+                                         ? answer.substr(value_begin, end - value_begin)
+                                         : std::string{};
+        answer.replace(begin, end + suffix.size() - begin, replacement);
+        search_from = begin + replacement.size();
+    }
+}
+
 void append_organization_texting_emoji(std::string &answer,
                                        const std::string_view emoji,
                                        const texting_style_e style) {
@@ -1272,11 +1401,19 @@ void append_organization_texting_emoji(std::string &answer,
 
     util::trim(answer);
 
-    if (answer.ends_with(emoji)) {
+    if (answer.ends_with(emoji) || answer.contains(std::format("{}\n", emoji)) ||
+        answer.contains(std::format("{} ", emoji))) {
         return;
     }
 
-    answer += std::format(" {}", emoji);
+    const auto paragraph_end = answer.find("\n\n");
+
+    if (paragraph_end == std::string::npos) {
+        answer += std::format(" {}", emoji);
+        return;
+    }
+
+    answer.insert(paragraph_end, std::format(" {}", emoji));
 }
 
 [[nodiscard]] bool has_texting_prepayment_context(const std::string_view normalized_user_text) {
@@ -2280,6 +2417,10 @@ engine_answer_s LlamaEngine::ask(const std::string_view user_text,
     }
 
     if (active_profile() == assistant_profile_e::texting) {
+        if (auto answer = try_answer_from_normalized_organization_config(user_text); answer.has_value()) {
+            return std::move(*answer);
+        }
+
         return ask_texting(user_text, stream_callback);
     }
 
@@ -2342,28 +2483,45 @@ void LlamaEngine::reload_organization_config_if_changed() {
     }
 }
 
-std::optional<engine_answer_s> LlamaEngine::try_answer_from_organization_config(
-        const std::string_view user_text) {
-    auto config_answer = answer_from_organization_config(m_organization_config, user_text);
+[[nodiscard]] std::string workflow_organization_request_message() {
+    return
+            "⚠️ Данный запрос **не относится** непосредственно к **инструкциям в контексте рабочего процесса** "
+            "и к ним причастному или ситуациям, связанных с ЧС (первая медицинская помощь, пожар, "
+            "объявленая **беспилотная** или **ракетная** опасность и пр.).\n\n"
+            "Для составления ответов на сообщения пользователей касаемо самой организации, внешних и внутренних "
+            "моментов: \"в какие дни вы работаете?\", \"есть ли рядом парковка\", \"какие есть методы оплаты?\" "
+            "и многие другие — воспользуйтесь другим режимом бота — `Ответы клиентам`, сменив его рядом "
+            "с кнопкой отправки запроса, левее.\n\n"
+            "> Примечание: в случае, если Вы не согласны с данным ответом на ваш запрос и считаете его ошибочным, "
+            "то просим Вас 🙏 сообщить об этом, нажав сверху-справа на «Сообщить о проблеме», заполнив форму "
+            "со всей необходимой информацией и отправив получившуюся заявку. ✉️\n"
+            ">\n"
+            "> Заранее спасибо, что пытаетесь сделать нас лучше. 😊👍";
+}
 
-    if (!config_answer.has_value()) {
-        return std::nullopt;
-    }
-
+std::optional<engine_answer_s> LlamaEngine::complete_organization_config_answer(
+        const std::string_view user_text,
+        organization_config_answer_s config_answer,
+        const std::string_view log_reason) {
     const auto user_index = append_pending_user_entry(user_text);
     auto answer_body = std::string{};
 
-    if (active_profile() == assistant_profile_e::texting) {
-        answer_body = std::move(config_answer->customer_text);
+    if (active_profile() == assistant_profile_e::workflow) {
+        answer_body = workflow_organization_request_message();
+    } else if (active_profile() == assistant_profile_e::texting) {
+        answer_body = std::move(config_answer.customer_text);
+        apply_organization_texting_style_tokens(answer_body, m_config.texting_style);
         ensure_texting_reply_greeting(answer_body, user_text, m_config.texting_style);
         append_organization_texting_emoji(answer_body,
-                                          config_answer->emoji,
+                                          config_answer.emoji,
                                           m_config.texting_style);
     } else if (looks_like_customer_reply_request(user_text)) {
+        auto customer_text = std::move(config_answer.customer_text);
+        apply_organization_texting_style_tokens(customer_text, m_config.texting_style);
         answer_body = std::format("Клиенту можно ответить:\n\n«{}»",
-                                  config_answer->customer_text);
+                                  customer_text);
     } else {
-        answer_body = std::move(config_answer->fact_text);
+        answer_body = std::move(config_answer.fact_text);
     }
 
     util::trim(answer_body);
@@ -2375,9 +2533,7 @@ std::optional<engine_answer_s> LlamaEngine::try_answer_from_organization_config(
     }
 
     auto source_filenames = std::vector<std::string>{std::move(source_filename)};
-    auto visible_answer = active_profile() == assistant_profile_e::workflow
-                                  ? ensure_sources_block(answer_body, source_filenames)
-                                  : answer_body;
+    auto visible_answer = answer_body;
 
     const auto empty_knowledge = std::span<const retrieved_knowledge_s>{};
     auto context_state = make_context_state(false,
@@ -2419,15 +2575,113 @@ std::optional<engine_answer_s> LlamaEngine::try_answer_from_organization_config(
             assistant_id);
     save_history();
 
-    m_logger->info("Answered from organization config: profile={} topic='{}' source='{}'",
+    m_logger->info("Answered from organization config: profile={} topic='{}' reason='{}' source='{}'",
                    to_string(active_profile()),
-                   config_answer->topic,
+                   config_answer.topic,
+                   log_reason,
                    m_config.organization_config_file.string());
 
     return engine_answer_s{
             .status = chat_message_status_e::completed,
             .content = std::move(visible_answer),
     };
+}
+
+std::optional<engine_answer_s> LlamaEngine::try_answer_from_organization_config(
+        const std::string_view user_text) {
+    auto config_answer = answer_from_organization_config(m_organization_config, user_text);
+
+    if (!config_answer.has_value()) {
+        return std::nullopt;
+    }
+
+    return complete_organization_config_answer(user_text,
+                                               std::move(*config_answer),
+                                               "direct");
+}
+
+std::optional<std::string> LlamaEngine::normalize_texting_organization_query(
+        const std::string_view user_text) {
+    if (active_profile() != assistant_profile_e::texting || user_text.empty()) {
+        return std::nullopt;
+    }
+
+    if (!m_server.is_running()) {
+        return std::nullopt;
+    }
+
+    const auto input_chars = choose_texting_normalizer_input_chars(m_config, user_text);
+    const auto messages = std::array{
+            chat_message_s{
+                    .role = chat_role_e::system,
+                    .name = "texting_organization_query_normalizer",
+                    .content = build_texting_organization_query_normalizer_prompt(),
+                    .created_at = util::make_local_timestamp(),
+                    .source_files = {},
+            },
+            chat_message_s{
+                    .role = chat_role_e::user,
+                    .name = "user",
+                    .content = truncate_utf8(user_text, input_chars),
+                    .created_at = util::make_local_timestamp(),
+                    .source_files = {},
+            },
+    };
+
+    const auto response = m_client.complete_chat(
+            messages,
+            {},
+            llm::llama_completion_options_s{
+                    .temperature = 0.0,
+                    .top_p = 1.0,
+                    .max_tokens = m_config.max_texting_normalizer_tokens,
+            });
+
+    if (response.status == llm::llama_completion_status_e::cancelled) {
+        return std::nullopt;
+    }
+
+    const auto normalized = parse_texting_organization_normalized_query(response.content);
+
+    if (!normalized.has_value()) {
+        m_logger->info("Texting organization query normalizer returned no usable query");
+        return std::nullopt;
+    }
+
+    m_logger->info("Texting organization query normalized: '{}' -> '{}'",
+                   compact_whitespace(user_text),
+                   *normalized);
+
+    return normalized;
+}
+
+std::optional<engine_answer_s> LlamaEngine::try_answer_from_normalized_organization_config(
+        const std::string_view user_text) {
+    auto normalized_query = std::optional<std::string>{};
+
+    try {
+        normalized_query = normalize_texting_organization_query(user_text);
+    } catch (const std::exception &error) {
+        m_logger->warn("Texting organization query normalization failed: {}", error.what());
+        return std::nullopt;
+    } catch (...) {
+        m_logger->warn("Texting organization query normalization failed with an unknown error");
+        return std::nullopt;
+    }
+
+    if (!normalized_query.has_value()) {
+        return std::nullopt;
+    }
+
+    auto config_answer = answer_from_organization_config(m_organization_config, *normalized_query);
+
+    if (!config_answer.has_value()) {
+        return std::nullopt;
+    }
+
+    return complete_organization_config_answer(user_text,
+                                               std::move(*config_answer),
+                                               "llm-normalized");
 }
 
 engine_answer_s LlamaEngine::ask_workflow(const std::string_view user_text,
@@ -2853,120 +3107,8 @@ engine_answer_s LlamaEngine::ask_texting(const std::string_view user_text,
     auto knowledge = std::vector<retrieved_knowledge_s>{};
 
     if (!transform_previous_answer) {
-        auto selector_response = llm::llama_client_response_s{};
-        auto selector_completed = false;
-
-        try {
-            const auto selector_messages = std::array{
-                    chat_message_s{
-                            .role = chat_role_e::system,
-                            .name = "texting_scenario_selector",
-                            .content = build_texting_selector_system_prompt(),
-                            .created_at = util::make_local_timestamp(),
-                            .source_files = {},
-                    },
-                    chat_message_s{
-                            .role = chat_role_e::user,
-                            .name = "user",
-                            .content = truncate_utf8(user_text, m_config.max_texting_selector_input_chars),
-                            .created_at = util::make_local_timestamp(),
-                            .source_files = {},
-                    },
-            };
-
-            selector_response = m_client.complete_chat(
-                    selector_messages,
-                    {},
-                    llm::llama_completion_options_s{
-                            .temperature = 0.0,
-                            .top_p = 1.0,
-                            .max_tokens = m_config.max_texting_selector_tokens,
-                    });
-            selector_completed = true;
-        } catch (const std::exception &error) {
-            m_logger->warn("Texting scenario selector failed; generating without scripts: {}", error.what());
-        } catch (...) {
-            m_logger->warn("Texting scenario selector failed with an unknown error; generating without scripts");
-        }
-
-        if (selector_completed) {
-            m_logger->debug("Texting scenario selector response: {}",
-                            compact_whitespace(selector_response.content));
-        }
-
-        if (selector_completed && selector_response.status == llm::llama_completion_status_e::cancelled) {
-            m_active_context.history[user_index].status = chat_message_status_e::cancelled;
-            save_history();
-
-            return engine_answer_s{
-                    .status = chat_message_status_e::cancelled,
-                    .content = {},
-            };
-        }
-
-        auto selector_queries = selector_completed
-                                        ? parse_texting_selector_queries(
-                                                  selector_response.content,
-                                                  std::max<std::size_t>(m_config.max_texting_selected_scripts, 3))
-                                        : std::vector<std::string>{};
-
-        if (selector_queries.empty()) {
-            m_logger->warn("Texting scenario selector returned no usable queries; retrying with a compact prompt");
-
-            try {
-                const auto retry_messages = std::array{
-                        chat_message_s{
-                                .role = chat_role_e::system,
-                                .name = "texting_scenario_selector_retry",
-                                .content = build_texting_selector_retry_system_prompt(),
-                                .created_at = util::make_local_timestamp(),
-                                .source_files = {},
-                        },
-                        chat_message_s{
-                                .role = chat_role_e::user,
-                                .name = "user",
-                                .content = truncate_utf8(user_text, m_config.max_texting_selector_input_chars),
-                                .created_at = util::make_local_timestamp(),
-                                .source_files = {},
-                        },
-                };
-
-                const auto retry_response = m_client.complete_chat(
-                        retry_messages,
-                        {},
-                        llm::llama_completion_options_s{
-                                .temperature = 0.0,
-                                .top_p = 1.0,
-                                .max_tokens = std::min<std::int32_t>(m_config.max_texting_selector_tokens, 64),
-                        });
-
-                if (retry_response.status == llm::llama_completion_status_e::cancelled) {
-                    m_active_context.history[user_index].status = chat_message_status_e::cancelled;
-                    save_history();
-
-                    return engine_answer_s{
-                            .status = chat_message_status_e::cancelled,
-                            .content = {},
-                    };
-                }
-
-                m_logger->debug("Texting compact selector response: {}",
-                                compact_whitespace(retry_response.content));
-                selector_queries = parse_texting_selector_queries(
-                        retry_response.content,
-                        std::max<std::size_t>(m_config.max_texting_selected_scripts, 3));
-            } catch (const std::exception &error) {
-                m_logger->warn("Texting compact selector retry failed: {}", error.what());
-            } catch (...) {
-                m_logger->warn("Texting compact selector retry failed with an unknown error");
-            }
-        }
-
-        if (selector_queries.empty()) {
-            m_logger->info("Texting scenario selector returned no usable queries after retry");
-        }
-
-        const auto retrieve_texting_query = [&](const std::string_view query) {
+        const auto retrieve_texting_query = [&](const std::string_view query,
+                                                const std::size_t min_ranked_score) {
             const auto retrieve_from_source = [&](const knowledge_source_e source,
                                                   const texting_style_e style) {
                 return m_active_context.knowledge.retrieve_glossary(
@@ -2979,7 +3121,7 @@ engine_answer_s LlamaEngine::ask_texting(const std::string_view user_text,
                                 .texting_style = style,
                                 .limit = 1,
                                 .max_chars_per_document = m_config.max_knowledge_chars_per_document,
-                                .min_ranked_score = m_config.min_ranked_knowledge_score,
+                                .min_ranked_score = min_ranked_score,
                         });
             };
 
@@ -3003,20 +3145,160 @@ engine_answer_s LlamaEngine::ask_texting(const std::string_view user_text,
             return candidate;
         };
 
-        for (const auto &query : selector_queries) {
-            m_logger->info("Texting LLM selector query: '{}'", query);
+        auto direct_candidate = retrieve_texting_query(user_text, m_config.min_ranked_knowledge_score);
+        append_unique_knowledge(knowledge, direct_candidate, m_config.max_texting_selected_scripts);
 
-            auto candidate = retrieve_texting_query(query);
-            append_unique_knowledge(knowledge, candidate, m_config.max_texting_selected_scripts);
+        if (!knowledge.empty()) {
+            m_logger->info("Texting script matched directly before LLM selector");
+        }
 
-            if (knowledge.size() >= m_config.max_texting_selected_scripts) {
-                break;
+        auto selector_queries = std::vector<std::string>{};
+
+        if (knowledge.empty()) {
+            auto selector_response = llm::llama_client_response_s{};
+            auto selector_completed = false;
+
+            try {
+                const auto selector_messages = std::array{
+                        chat_message_s{
+                                .role = chat_role_e::system,
+                                .name = "texting_scenario_selector",
+                                .content = build_texting_selector_system_prompt(),
+                                .created_at = util::make_local_timestamp(),
+                                .source_files = {},
+                        },
+                        chat_message_s{
+                                .role = chat_role_e::user,
+                                .name = "user",
+                                .content = truncate_utf8(user_text, m_config.max_texting_selector_input_chars),
+                                .created_at = util::make_local_timestamp(),
+                                .source_files = {},
+                        },
+                };
+
+                selector_response = m_client.complete_chat(
+                        selector_messages,
+                        {},
+                        llm::llama_completion_options_s{
+                                .temperature = 0.0,
+                                .top_p = 1.0,
+                                .max_tokens = m_config.max_texting_selector_tokens,
+                        });
+                selector_completed = true;
+            } catch (const std::exception &error) {
+                m_logger->warn("Texting scenario selector failed; generating without scripts: {}", error.what());
+            } catch (...) {
+                m_logger->warn("Texting scenario selector failed with an unknown error; generating without scripts");
+            }
+
+            if (selector_completed) {
+                m_logger->debug("Texting scenario selector response: {}",
+                                compact_whitespace(selector_response.content));
+            }
+
+            if (selector_completed && selector_response.status == llm::llama_completion_status_e::cancelled) {
+                m_active_context.history[user_index].status = chat_message_status_e::cancelled;
+                save_history();
+
+                return engine_answer_s{
+                        .status = chat_message_status_e::cancelled,
+                        .content = {},
+                };
+            }
+
+            selector_queries = selector_completed
+                                       ? parse_texting_selector_queries(
+                                                 selector_response.content,
+                                                 std::max<std::size_t>(m_config.max_texting_selected_scripts, 3))
+                                       : std::vector<std::string>{};
+
+            if (selector_queries.empty()) {
+                m_logger->warn("Texting scenario selector returned no usable queries; retrying with a compact prompt");
+
+                try {
+                    const auto retry_messages = std::array{
+                            chat_message_s{
+                                    .role = chat_role_e::system,
+                                    .name = "texting_scenario_selector_retry",
+                                    .content = build_texting_selector_retry_system_prompt(),
+                                    .created_at = util::make_local_timestamp(),
+                                    .source_files = {},
+                            },
+                            chat_message_s{
+                                    .role = chat_role_e::user,
+                                    .name = "user",
+                                    .content = truncate_utf8(user_text, m_config.max_texting_selector_input_chars),
+                                    .created_at = util::make_local_timestamp(),
+                                    .source_files = {},
+                            },
+                    };
+
+                    const auto retry_response = m_client.complete_chat(
+                            retry_messages,
+                            {},
+                            llm::llama_completion_options_s{
+                                    .temperature = 0.0,
+                                    .top_p = 1.0,
+                                    .max_tokens = std::min<std::int32_t>(m_config.max_texting_selector_tokens, 64),
+                            });
+
+                    if (retry_response.status == llm::llama_completion_status_e::cancelled) {
+                        m_active_context.history[user_index].status = chat_message_status_e::cancelled;
+                        save_history();
+
+                        return engine_answer_s{
+                                .status = chat_message_status_e::cancelled,
+                                .content = {},
+                        };
+                    }
+
+                    m_logger->debug("Texting compact selector response: {}",
+                                    compact_whitespace(retry_response.content));
+                    selector_queries = parse_texting_selector_queries(
+                            retry_response.content,
+                            std::max<std::size_t>(m_config.max_texting_selected_scripts, 3));
+                } catch (const std::exception &error) {
+                    m_logger->warn("Texting compact selector retry failed: {}", error.what());
+                } catch (...) {
+                    m_logger->warn("Texting compact selector retry failed with an unknown error");
+                }
+            }
+
+            if (selector_queries.empty()) {
+                m_logger->info("Texting scenario selector returned no usable queries after retry");
+            }
+
+            for (const auto &query : selector_queries) {
+                m_logger->info("Texting LLM selector query: '{}'", query);
+
+                auto candidate = retrieve_texting_query(query, m_config.min_ranked_knowledge_score);
+                append_unique_knowledge(knowledge, candidate, m_config.max_texting_selected_scripts);
+
+                if (knowledge.size() >= m_config.max_texting_selected_scripts) {
+                    break;
+                }
+            }
+        }
+
+        if (knowledge.empty()) {
+            auto fallback_queries = selector_queries;
+            fallback_queries.push_back(std::string{user_text});
+
+            for (const auto &query : fallback_queries) {
+                auto candidate = retrieve_texting_query(query, 0);
+                append_unique_knowledge(knowledge, candidate, 1);
+
+                if (!knowledge.empty()) {
+                    m_logger->info("Texting nearest script fallback selected a low-score candidate");
+                    break;
+                }
             }
         }
 
         if (looks_like_plain_texting_cancellation(normalized_user_text)) {
             m_logger->info("Texting routing override: using the plain cancellation scenario");
-            auto candidate = retrieve_texting_query("Клиент хочет отменить запись заранее");
+            auto candidate = retrieve_texting_query("Клиент хочет отменить запись заранее",
+                                                    m_config.min_ranked_knowledge_score);
 
             if (!candidate.empty()) {
                 knowledge.clear();

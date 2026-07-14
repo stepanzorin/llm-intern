@@ -50,6 +50,11 @@ struct engine_config_s {
     std::size_t max_texting_selector_input_chars = 1200;
     std::int32_t max_texting_selector_tokens = 96;
 
+    std::size_t max_texting_normalizer_small_context_chars = 512;
+    std::size_t max_texting_normalizer_medium_context_chars = 1024;
+    std::size_t max_texting_normalizer_large_context_chars = 2048;
+    std::int32_t max_texting_normalizer_tokens = 32;
+
     std::size_t max_texting_adaptation_input_chars = 1200;
     std::size_t max_texting_adaptation_chars_per_script = 1200;
     std::size_t max_texting_script_edits = 5;
@@ -166,6 +171,17 @@ private:
             const llm::llama_stream_callback_t &stream_callback);
 
     [[nodiscard]] std::optional<engine_answer_s> try_answer_from_organization_config(
+            std::string_view user_text);
+
+    [[nodiscard]] std::optional<engine_answer_s> try_answer_from_normalized_organization_config(
+            std::string_view user_text);
+
+    [[nodiscard]] std::optional<engine_answer_s> complete_organization_config_answer(
+            std::string_view user_text,
+            organization_config_answer_s config_answer,
+            std::string_view log_reason);
+
+    [[nodiscard]] std::optional<std::string> normalize_texting_organization_query(
             std::string_view user_text);
 
     void load_organization_config();

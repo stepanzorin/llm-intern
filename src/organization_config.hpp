@@ -6,7 +6,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace stz::intern {
@@ -75,8 +74,10 @@ struct organization_payment_methods_s {
     bool qr_code = false;
     bool sbp = false;
     bool online = false;
+    bool gift_certificate = false;
     bool on_site = true;
     bool prepayment_required = false;
+    std::string gift_certificate_note = {};
     std::string note = {};
 };
 
@@ -107,6 +108,7 @@ struct organization_general_amenities_s {
     bool has_staff_call_button = false;
     bool has_ramp = false;
     bool smoking_allowed = false;
+    bool smoke_breaks_allowed = false;
 
     organization_parking_s parking = {};
     organization_pets_policy_s pets = {};
@@ -126,26 +128,55 @@ struct organization_service_minor_access_s {
     std::optional<std::size_t> min_age = std::nullopt;
 };
 
+struct organization_minor_service_direction_s {
+    bool available = false;
+    std::optional<std::size_t> min_age = std::nullopt;
+};
+
+struct organization_service_warranty_s {
+    bool provided = false;
+    std::optional<std::size_t> period_days = std::nullopt;
+    std::string note = {};
+};
+
 struct organization_service_s {
     std::string name = {};
     std::vector<std::string> aliases = {};
     std::vector<std::string> directions = {};
-    organization_service_minor_access_s minor_access = {};
-    bool warranty_case = false;
-    std::string warranty_note = {};
+    std::optional<organization_service_minor_access_s> minor_access = std::nullopt;
+    organization_service_warranty_s warranty = {};
 };
 
 struct beauty_salon_service_directions_s {
     bool manicure = false;
+    organization_minor_service_direction_s child_manicure = {};
+
     bool pedicure = false;
+    organization_minor_service_direction_s child_pedicure = {};
+
     bool brows = false;
+    organization_minor_service_direction_s child_brows = {};
+
     bool eyelashes = false;
+    organization_minor_service_direction_s child_eyelashes = {};
+
     bool hairdressing = false;
+    organization_minor_service_direction_s child_hairdressing = {};
+
     bool cosmetology = false;
+    organization_minor_service_direction_s child_cosmetology = {};
+
     bool hair_removal = false;
+    organization_minor_service_direction_s child_hair_removal = {};
+
     bool makeup = false;
+    organization_minor_service_direction_s child_makeup = {};
+
     bool massage = false;
+    organization_minor_service_direction_s child_massage = {};
+
     bool podology = false;
+    organization_minor_service_direction_s child_podology = {};
 };
 
 struct beauty_salon_config_s {
@@ -214,8 +245,6 @@ struct organization_config_s {
     organization_payment_methods_s payment_methods = {};
     organization_general_amenities_s general_amenities = {};
     organization_business_details_s business_details = {};
-
-    std::unordered_map<std::string, std::string> emojis = {};
 
     std::filesystem::path source_file = {};
 };

@@ -9,6 +9,8 @@ target_sources(
         chat_history.hpp
         config.cpp
         config.hpp
+        emojis.cpp
+        emojis.hpp
         engine.cpp
         engine.hpp
         knowledge_storage.cpp
