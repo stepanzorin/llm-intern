@@ -101,6 +101,7 @@ struct organization_pets_policy_s {
 struct organization_general_amenities_s {
     bool has_wifi = false;
     bool has_free_coffee = false;
+    bool has_tv = false;
     bool has_child_zone = false;
     bool serves_minors = false;
     bool minor_parent_presence_required = false;
@@ -115,7 +116,13 @@ struct organization_general_amenities_s {
 
     std::string wifi_note = {};
     std::string coffee_note = {};
+    std::string tv_note = {};
     std::string child_zone_note = {};
+
+    std::size_t minor_nail_coating_min_age = 14;
+    std::size_t minor_parental_consent_from_age = 15;
+    std::size_t minor_parental_consent_until_age = 17;
+    std::size_t minor_child_visit_with_parent_until_age = 10;
     std::string minors_note = {};
     std::string gift_certificates_note = {};
     std::string staff_call_button_note = {};

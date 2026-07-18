@@ -1182,6 +1182,32 @@ void append_utf8(std::string &result, const char32_t codepoint) {
     return text;
 }
 
+[[nodiscard]] std::string friendly_flower() {
+    return "[[friendly: 🌸]]";
+}
+
+[[nodiscard]] std::string direct_chat_booking_offer() {
+    return std::format(
+            "И если Вам удобнее, мы можем записать Вас прямо здесь, в чате! "
+            "Подскажите, какую услугу Вы хотите получить и на какой день и время "
+            "ориентируетесь? 😊{}",
+            friendly_flower());
+}
+
+[[nodiscard]] std::string nearby_slots_offer() {
+    return std::format(
+            "Подсказать ближайшие свободные окошки? Подберём удобный день? 😊{}",
+            friendly_flower());
+}
+
+[[nodiscard]] std::string service_selection_offer() {
+    return std::format(
+            "Скажите, присмотрели что-то для себя? Если да, напишите, пожалуйста, "
+            "в какие дни и в какое время Вам было бы удобнее прийти, и я подберу "
+            "для Вас ближайшие свободные окошки! 😊{}",
+            friendly_flower());
+}
+
 [[nodiscard]] organization_config_answer_s make_answer(const organization_config_s &config,
                                                         std::string topic,
                                                         std::string fact_text,
@@ -1193,6 +1219,20 @@ void append_utf8(std::string &result, const char32_t codepoint) {
             .emoji = emoji_for(topic),
     };
 }
+
+[[nodiscard]] organization_config_answer_s make_answer_without_trailing_emoji(
+        const organization_config_s &config,
+        std::string topic,
+        std::string fact_text,
+        std::string customer_text) {
+    auto answer = make_answer(config,
+                              std::move(topic),
+                              std::move(fact_text),
+                              std::move(customer_text));
+    answer.emoji.clear();
+    return answer;
+}
+
 
 struct schedule_request_s {
     bool full = false;
@@ -1438,7 +1478,15 @@ constexpr auto weekdays = std::array{
         const organization_schedule_s &schedule,
         const std::vector<std::string_view> &requested_weekdays,
         const bool customer_facing) {
-    auto parts = std::vector<std::string>{};
+    struct requested_day_s {
+        std::string label = {};
+        std::string opens = {};
+        std::string closes = {};
+        bool working = false;
+    };
+
+    auto requested = std::vector<requested_day_s>{};
+    requested.reserve(requested_weekdays.size());
 
     for (const auto requested_day : requested_weekdays) {
         const auto weekday_it = std::ranges::find(weekdays,
@@ -1456,29 +1504,78 @@ constexpr auto weekdays = std::array{
                                                              rule.days.end();
                                                   });
 
+        auto label = std::string{weekday_it->customer_label};
+        if (label.starts_with("по ")) {
+            label.erase(0, std::string_view{"по "}.size());
+        }
+
         if (rule_it == schedule.regular.end() ||
             rule_it->opens.empty() || rule_it->closes.empty()) {
+            requested.push_back(requested_day_s{.label = std::move(label)});
+            continue;
+        }
+
+        requested.push_back(requested_day_s{
+                .label = std::move(label),
+                .opens = rule_it->opens,
+                .closes = rule_it->closes,
+                .working = true,
+        });
+    }
+
+    if (requested.empty()) {
+        return {};
+    }
+
+    const auto same_schedule = std::ranges::all_of(requested, [&](const auto &day) {
+        return day.working == requested.front().working &&
+               day.opens == requested.front().opens &&
+               day.closes == requested.front().closes;
+    });
+
+    if (same_schedule) {
+        auto labels = std::vector<std::string>{};
+        labels.reserve(requested.size());
+        for (const auto &day : requested) {
+            labels.push_back(day.label);
+        }
+
+        const auto days_text = join_human_readable(labels);
+        if (!requested.front().working) {
+            return customer_facing
+                           ? std::format("По {} мы не работаем", days_text)
+                           : std::format("По {} — выходной", days_text);
+        }
+
+        return customer_facing
+                       ? std::format("По {} мы работаем с {} до {}",
+                                     days_text,
+                                     requested.front().opens,
+                                     requested.front().closes)
+                       : std::format("По {} — с {} до {}",
+                                     days_text,
+                                     requested.front().opens,
+                                     requested.front().closes);
+    }
+
+    auto parts = std::vector<std::string>{};
+    for (const auto &day : requested) {
+        if (!day.working) {
             parts.push_back(customer_facing
-                                    ? std::format("{} мы не работаем",
-                                                  capitalize_first(
-                                                          std::string{weekday_it->customer_label}))
-                                    : std::format("{} — выходной",
-                                                  capitalize_first(
-                                                          std::string{weekday_it->customer_label})));
+                                    ? std::format("По {} мы не работаем", day.label)
+                                    : std::format("По {} — выходной", day.label));
             continue;
         }
 
         parts.push_back(customer_facing
-                                ? std::format("{} мы работаем с {} до {}",
-                                              capitalize_first(
-                                                      std::string{weekday_it->customer_label}),
-                                              rule_it->opens,
-                                              rule_it->closes)
-                                : std::format("{} — с {} до {}",
-                                              capitalize_first(
-                                                      std::string{weekday_it->customer_label}),
-                                              rule_it->opens,
-                                              rule_it->closes));
+                                ? std::format("По {} мы работаем с {} до {}",
+                                              day.label,
+                                              day.opens,
+                                              day.closes)
+                                : std::format("По {} — с {} до {}",
+                                              day.label,
+                                              day.opens,
+                                              day.closes));
     }
 
     return join_strings(parts, "\n");
@@ -1551,14 +1648,35 @@ constexpr auto weekdays = std::array{
         }
     }
 
-    const auto fact = join_strings(fact_parts, "\n\n");
-    const auto customer = join_strings(customer_parts, "\n\n");
+    auto fact = join_strings(fact_parts, "\n\n");
+    auto customer = join_strings(customer_parts, "\n\n");
 
     if (fact.empty() || customer.empty()) {
         return std::nullopt;
     }
 
-    return make_answer(config, "schedule", fact, customer);
+    const auto is_regular_schedule_request = !request.holidays && !request.new_year;
+    if (is_regular_schedule_request) {
+        customer = sentence(std::move(customer));
+        customer += " 🕒";
+        customer += "\n\n";
+
+        if (!request.weekdays.empty()) {
+            customer += std::format(
+                    "Хотите, посмотрю свободные ближайшие окошки на {}? 😊{}",
+                    request.weekdays.size() == 1 ? "этот день" : "эти дни",
+                    friendly_flower());
+        } else {
+            customer +=
+                    "Подскажите, какой день недели Вам был бы удобен? "
+                    "Я с удовольствием подберу для Вас комфортное время!";
+        }
+    }
+
+    return make_answer_without_trailing_emoji(config,
+                                               "schedule",
+                                               std::move(fact),
+                                               std::move(customer));
 }
 
 struct address_request_s {
@@ -1835,6 +1953,51 @@ void apply_payment_answer_emoji(organization_config_answer_s &answer,
         const organization_config_s &config,
         const payment_request_s &request) {
     const auto &payment = config.payment_methods;
+
+    const auto is_standalone_prepayment_question =
+            request.prepayment && !request.prepayment_paid &&
+            !request.has_specific_method() && !request.certificate_validity;
+    const auto is_standalone_postpayment_question =
+            request.postpayment && !request.prepayment_paid &&
+            !request.has_specific_method() && !request.certificate_validity;
+
+    if (!payment.prepayment_required && is_standalone_prepayment_question) {
+        auto customer = std::format(
+                "Нет, предоплата не нужна. 😊{}",
+                friendly_flower());
+        customer += "\n\n";
+        customer +=
+                "Вы оплачиваете услуги в самом салоне, уже после их завершения. 😌✨ "
+                "Мы можем попросить предоплату только в редких случаях — например, "
+                "для сложной или очень длительной услуги. Наш администратор обязательно "
+                "сообщит Вам об этом заранее при подтверждении записи. ☝️";
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+
+        return make_answer_without_trailing_emoji(
+                config,
+                "payment",
+                "Обязательная предоплата не требуется; оплата производится после услуги, "
+                "если иное заранее не согласовано для конкретной записи",
+                std::move(customer));
+    }
+
+    if (!payment.prepayment_required && is_standalone_postpayment_question) {
+        auto customer = std::string{
+                "Вы оплачиваете услуги в самом салоне, уже после их завершения. 😌✨ "
+                "Если для Вашей процедуры потребуется предоплата, наш администратор "
+                "обязательно сообщит Вам об этом заранее при подтверждении записи. ☝️"};
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+
+        return make_answer_without_trailing_emoji(
+                config,
+                "payment",
+                "Оплата производится после оказания услуги, если для конкретной записи "
+                "заранее не согласована предоплата",
+                std::move(customer));
+    }
+
     const auto methods = std::array{
             payment_method_view_s{request.cash, payment.cash, "наличными"},
             payment_method_view_s{request.card, payment.card, "обычной банковской картой"},
@@ -2382,6 +2545,19 @@ void append_requested_booking_method(booking_request_s &request,
     return std::nullopt;
 }
 
+[[nodiscard]] std::string booking_method_general_list_label(
+        const organization_booking_method_s &method) {
+    if (method.id == "phone") return "По телефону ☎️";
+    if (method.id == "yandex_maps") return "Через Яндекс.Карты 🗺️";
+    if (method.id == "telegram") return "через Telegram 💬";
+    if (method.id == "whatsapp") return "через WhatsApp 💬";
+    if (method.id == "max") return "через MAX 💬";
+    if (method.id == "website") return "на сайте 🌐";
+    if (method.id == "2gis") return "через 2ГИС 🗺️";
+    if (method.id == "google_maps") return "через Google Maps 🗺️";
+    return booking_method_label(method);
+}
+
 [[nodiscard]] std::vector<std::string> alternative_booking_method_labels(
         const organization_config_s &config,
         const booking_request_s &request,
@@ -2406,25 +2582,27 @@ void append_requested_booking_method(booking_request_s &request,
     return labels;
 }
 
-[[nodiscard]] std::string booking_phone_section(const organization_config_s &config,
-                                                const organization_booking_method_s &method) {
-    auto lines = std::vector<std::string>{};
+[[nodiscard]] std::string booking_phone_customer_text(
+        const organization_config_s &config,
+        const organization_booking_method_s &method) {
+    const auto value = booking_method_value_line(method);
+    const auto schedule = short_regular_schedule_text(config);
 
-    if (const auto value = booking_method_value_line(method); !value.empty()) {
-        lines.push_back(value);
+    auto customer = value.empty()
+                            ? std::string{"Для записи позвоните нам по телефону"}
+                            : std::format("Для записи позвоните по номеру 📞 {}", value);
+
+    if (!schedule.empty()) {
+        customer += std::format(" (мы на связи {} 🕒).", schedule);
+    } else {
+        customer = sentence(std::move(customer));
     }
 
-    if (const auto schedule = short_regular_schedule_text(config); !schedule.empty()) {
-        lines.push_back(std::format("Позвоните в часы работы салона — {}.", schedule));
-    } else if (!method.instructions.empty()) {
-        lines.push_back(customer_booking_instruction(method.instructions));
-    }
-
-    lines.push_back("Мы всегда рады вашему звонку 😊");
-    return text_section("По телефону", join_strings(lines, "\n"));
+    customer += " Мы всегда рады Вашему звонку 😌";
+    return customer;
 }
 
-[[nodiscard]] std::string booking_yandex_maps_section(
+[[nodiscard]] std::string booking_yandex_maps_steps(
         const organization_config_s &config) {
     const auto brand = config.brand_name.empty()
                                ? std::string{"название нашей организации"}
@@ -2437,7 +2615,12 @@ void append_requested_booking_method(booking_request_s &request,
             "4. Нажмите кнопку онлайн-записи, выберите удобную дату и время. И всё — готово! 🎉🎊",
     };
 
-    return text_section("Через Яндекс.Карты", join_strings(lines, "\n"));
+    return join_strings(lines, "\n");
+}
+
+[[nodiscard]] std::string booking_yandex_maps_section(
+        const organization_config_s &config) {
+    return text_section("Через Яндекс.Карты", booking_yandex_maps_steps(config));
 }
 
 [[nodiscard]] std::string booking_messenger_display_name(const std::string_view method_id) {
@@ -2484,28 +2667,6 @@ void append_requested_booking_method(booking_request_s &request,
     return text_section("На сайте", join_strings(lines, "\n"));
 }
 
-[[nodiscard]] std::string rich_booking_method_section(
-        const organization_config_s &config,
-        const organization_booking_method_s &method) {
-    if (method.id == "phone") {
-        return booking_phone_section(config, method);
-    }
-
-    if (method.id == "yandex_maps") {
-        return booking_yandex_maps_section(config);
-    }
-
-    if (method.id == "telegram" || method.id == "whatsapp" || method.id == "max") {
-        return booking_messenger_section(method);
-    }
-
-    if (method.id == "website") {
-        return booking_website_section(method);
-    }
-
-    return booking_method_section(config, method, true);
-}
-
 [[nodiscard]] std::optional<organization_config_answer_s> general_booking_answer(
         const organization_config_s &config) {
     auto methods = ordered_booking_methods(config);
@@ -2516,12 +2677,33 @@ void append_requested_booking_method(booking_request_s &request,
 
     auto fact_sections = std::vector<std::string>{};
     auto customer_sections = std::vector<std::string>{};
+    auto compact_customer_methods = std::vector<std::string>{};
     fact_sections.reserve(methods.size());
     customer_sections.reserve(methods.size() + 1);
+    compact_customer_methods.reserve(methods.size());
 
     for (const auto &method : methods) {
         fact_sections.push_back(booking_method_section(config, method, false));
-        customer_sections.push_back(rich_booking_method_section(config, method));
+
+        if (method.id == "phone") {
+            customer_sections.push_back(std::format(
+                    "— {}:\n{}",
+                    booking_method_general_list_label(method),
+                    booking_phone_customer_text(config, method)));
+        } else if (method.id == "yandex_maps") {
+            customer_sections.push_back(std::format(
+                    "— {}:\n{}",
+                    booking_method_general_list_label(method),
+                    booking_yandex_maps_steps(config)));
+        } else {
+            compact_customer_methods.push_back(std::format(
+                    "— {}",
+                    booking_method_general_list_label(method)));
+        }
+    }
+
+    if (!compact_customer_methods.empty()) {
+        customer_sections.push_back(join_strings(compact_customer_methods, "\n"));
     }
 
     auto fact = std::string{"Доступные способы записи:"};
@@ -2535,11 +2717,12 @@ void append_requested_booking_method(booking_request_s &request,
     customer += "\n\n";
     customer += join_strings(customer_sections, "\n\n");
     customer += "\n\n";
-    customer += "При возникновении трудностей — пишите! С удовольствием помогу Вам разобраться с записью 😊";
+    customer += direct_chat_booking_offer();
 
-    auto answer = make_answer(config, "booking", std::move(fact), std::move(customer));
-    answer.emoji.clear();
-    return answer;
+    return make_answer_without_trailing_emoji(config,
+                                               "booking",
+                                               std::move(fact),
+                                               std::move(customer));
 }
 
 [[nodiscard]] std::string specific_booking_customer_text(
@@ -2554,20 +2737,19 @@ void append_requested_booking_method(booking_request_s &request,
     }
 
     if (method.id == "phone") {
-        auto lines = std::vector<std::string>{};
+        const auto schedule = short_regular_schedule_text(config);
+        auto customer = value.empty()
+                                ? std::string{"Для записи позвоните нам по телефону"}
+                                : std::format("Для записи позвоните по номеру 📞 {}", value);
 
-        if (!value.empty()) {
-            lines.push_back(std::format("Для записи позвоните по номеру {}", value));
+        if (!schedule.empty()) {
+            customer += std::format(" (мы на связи {} 🕒).", schedule);
         } else {
-            lines.push_back("Для записи позвоните нам по телефону");
+            customer = sentence(std::move(customer));
         }
 
-        if (const auto schedule = short_regular_schedule_text(config); !schedule.empty()) {
-            lines.push_back(std::format("Лучше звонить в часы работы салона — {}", schedule));
-        }
-
-        lines.push_back("Мы всегда рады вашему звонку 😊");
-        return join_strings(lines, "\n");
+        customer += " Мы всегда рады Вашему звонку 😌";
+        return customer;
     }
 
     if (method.id == "telegram" || method.id == "whatsapp" || method.id == "max") {
@@ -2693,17 +2875,16 @@ void append_requested_booking_method(booking_request_s &request,
                         em_dash_list(customer_alternatives)));
             }
 
-            customer_sections.push_back(
-                    "Уточните, пожалуйста, какой способ записи для Вас удобнее?[[friendly: 😊]]");
         }
     }
 
-    auto answer = make_answer(config,
-                              "booking",
-                              join_strings(fact_sections, "\n\n"),
-                              join_strings(customer_sections, "\n\n"));
-    answer.emoji.clear();
-    return answer;
+    customer_sections.push_back(direct_chat_booking_offer());
+
+    return make_answer_without_trailing_emoji(
+            config,
+            "booking",
+            join_strings(fact_sections, "\n\n"),
+            join_strings(customer_sections, "\n\n"));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> booking_answer(
@@ -2944,30 +3125,84 @@ void append_requested_booking_method(booking_request_s &request,
                        std::move(customer));
 }
 
-[[nodiscard]] std::optional<organization_config_answer_s> coffee_for_guests_answer(
+[[nodiscard]] std::optional<organization_config_answer_s> wifi_answer(
         const organization_config_s &config) {
     const auto &amenities = config.general_amenities;
-    auto customer = amenities.has_free_coffee
-                            ? std::string{"Да, мы предлагаем гостям кофе"}
-                            : std::string{"Бесплатный кофе для гостей не предусмотрен"};
+    auto fact = std::format("Wi-Fi: {}", amenities.has_wifi ? "да" : "нет");
+    auto customer = std::string{};
 
-    if (!amenities.coffee_note.empty()) {
-        if (amenities.has_free_coffee &&
-            normalize_query(amenities.coffee_note) ==
-                    "кофе предлагают гостям во время ожидания") {
-            customer = "Да, во время ожидания мы предлагаем гостям кофе";
+    if (amenities.has_wifi) {
+        customer = std::format(
+                "Wi-Fi у нас есть и работает без перебоев. 📶{}",
+                "[[friendly: 🌷]]");
+        customer += "\n\n";
+        customer +=
+                "Время на процедуре пролетит незаметно — сможете с комфортом "
+                "полистать ленту, посмотреть фильм или послушать музыку. ✨ "
+                "Пароль Вам с радостью подскажет администратор";
+
+        if (amenities.has_free_coffee) {
+            customer +=
+                    ", а ещё обязательно предложит чашечку ароматного чая или кофе. ☕️✨";
         } else {
-            customer = amenities.has_free_coffee
-                               ? affirmative_note(amenities.coffee_note)
-                               : append_sentence(std::move(customer), amenities.coffee_note);
+            customer += ". 😌";
+        }
+
+        if (!amenities.wifi_note.empty()) {
+            fact = append_sentence(std::move(fact), amenities.wifi_note);
+        }
+    } else {
+        customer =
+                "Wi-Fi у нас отсутствует, но мобильная связь в салоне работает без "
+                "перебоев. 😌";
+
+        if (amenities.has_tv) {
+            customer += "\n\n";
+            customer += amenities.tv_note.empty()
+                                ? std::string{
+                                          "Во время процедуры Вы сможете отдохнуть — у нас "
+                                          "всегда транслируются интересные фильмы и передачи "
+                                          "на телевизоре. 📺✨"}
+                                : sentence(capitalize_first(amenities.tv_note));
         }
     }
 
-    return make_answer(config,
-                       "coffee",
-                       std::format("Бесплатный кофе для гостей: {}",
-                                   amenities.has_free_coffee ? "да" : "нет"),
-                       std::move(customer));
+    return make_answer_without_trailing_emoji(config,
+                                               "wifi",
+                                               std::move(fact),
+                                               std::move(customer));
+}
+
+[[nodiscard]] std::optional<organization_config_answer_s> coffee_for_guests_answer(
+        const organization_config_s &config) {
+    const auto &amenities = config.general_amenities;
+
+    if (!amenities.has_free_coffee) {
+        auto customer = std::string{
+                "Бесплатные чай и кофе для гостей у нас пока не предусмотрены. 😌"};
+        if (!amenities.coffee_note.empty()) {
+            customer = append_sentence(std::move(customer), amenities.coffee_note);
+        }
+
+        return make_answer_without_trailing_emoji(
+                config,
+                "coffee",
+                "Бесплатный кофе для гостей: нет",
+                std::move(customer));
+    }
+
+    auto customer = std::format(
+            "Каждого клиента, который записан к нам на процедуру, мы с радостью "
+            "угощаем чашечкой горячего кофе или чая абсолютно бесплатно. ☕️✨ "
+            "Насладиться напитком можно как перед началом, так и во время самой "
+            "услуги. 😌{}",
+            friendly_flower());
+
+    return make_answer_without_trailing_emoji(
+            config,
+            "coffee",
+            "Бесплатный кофе или чай для записанных клиентов: да",
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> child_zone_answer(
@@ -2976,39 +3211,54 @@ void append_requested_booking_method(booking_request_s &request,
     auto customer = std::string{};
 
     if (amenities.has_child_zone) {
-        customer = "Да, у нас есть детская зона";
+        customer = "Да, у нас есть отдельное игровое пространство для детей 🧸";
         if (!amenities.child_zone_note.empty()) {
             customer = append_sentence(std::move(customer), amenities.child_zone_note);
         }
     } else {
         customer =
-                "Отдельной детской зоны у нас, к сожалению, нет[[friendly: 🧸]]. Но в зоне ожидания есть удобный диван. Как вариант, Вы можете взять с собой планшет[[friendly: 📱]] или раскраску[[friendly: 🎨]], чтобы занять ребёнка[[friendly: 👼]]";
+                "Отдельного игрового пространства для детей у нас пока нет 🧸. "
+                "Но мы постарались сделать зону ожидания максимально комфортной — "
+                "там есть удобный диван. Отличная идея — взять с собой раскраску 🎨 "
+                "или планшет 📱, чтобы ребёнку было веселее проводить время 😌";
     }
 
-    return make_answer(config,
-                       "child_zone",
-                       std::format("Детская зона: {}",
-                                   amenities.has_child_zone ? "да" : "нет"),
-                       std::move(customer));
+    return make_answer_without_trailing_emoji(
+            config,
+            "child_zone",
+            std::format("Игровое пространство для детей: {}",
+                        amenities.has_child_zone ? "да" : "нет"),
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> gift_certificate_answer(
         const organization_config_s &config) {
     const auto &amenities = config.general_amenities;
-    auto customer = amenities.has_gift_certificates
-                            ? std::string{"Да, у нас можно приобрести подарочный сертификат"}
-                            : std::string{"Подарочные сертификаты не предусмотрены"};
 
-    if (amenities.has_gift_certificates &&
-        !amenities.gift_certificates_note.empty()) {
-        customer = affirmative_note(amenities.gift_certificates_note);
+    if (!amenities.has_gift_certificates) {
+        return make_answer_without_trailing_emoji(
+                config,
+                "gift_certificate",
+                "Подарочные сертификаты: нет",
+                "Подарочных сертификатов у нас пока нет");
     }
 
-    return make_answer(config,
-                       "gift_certificate",
-                       std::format("Подарочные сертификаты: {}",
-                                   amenities.has_gift_certificates ? "да" : "нет"),
-                       std::move(customer));
+    auto customer = std::string{
+            "Да, конечно! У нас есть подарочные сертификаты. 😌"};
+    customer += "\n\n";
+    customer += std::format(
+            "Их можно оформить у администратора на любую удобную для Вас сумму "
+            "или конкретную процедуру. Или прямо здесь, в чате. 😊{}",
+            friendly_flower());
+    customer += "\n\n";
+    customer += "Это идеальный подарок, который точно порадует! 🎁✨";
+
+    return make_answer_without_trailing_emoji(
+            config,
+            "gift_certificate",
+            append_sentence("Подарочные сертификаты: да",
+                            amenities.gift_certificates_note),
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> staff_call_button_answer(
@@ -3130,27 +3380,27 @@ void append_requested_booking_method(booking_request_s &request,
         if (!parking.accessible) {
             customer = "Отдельного парковочного места для людей с инвалидностью нет";
         } else {
-            if (parking.accessible_note.contains("рядом со входом")) {
-                customer =
-                        "Да, рядом со входом есть отдельное парковочное место для людей с инвалидностью.[[friendly: ♿]]";
-            } else if (!parking.accessible_note.empty()) {
-                customer = sentence(std::format(
-                        "Да, парковочное место для людей с инвалидностью {}",
-                        lowercase_first(parking.accessible_note)));
-                customer += "[[friendly: ♿]]";
-            } else {
-                customer =
-                        "Да, рядом есть отдельное парковочное место для людей с инвалидностью.[[friendly: ♿]]";
-            }
-
+            customer = parking.accessible_note.contains("рядом со входом")
+                               ? std::string{
+                                         "Да, рядом со входом есть отдельное парковочное "
+                                         "место для людей с инвалидностью. 🅿️♿"}
+                               : std::string{
+                                         "Да, рядом есть отдельное парковочное место для "
+                                         "людей с инвалидностью. 🅿️♿"};
+            customer += "\n\n";
             customer +=
-                    " Обычно оно свободно, но в часы пик может быть плотно. Если место будет занято, можно припарковаться во дворах или поставить автомобиль на платную городскую парковку. ";
+                    "Обычно оно свободно, но в часы пик может быть плотно. Если место "
+                    "будет занято, можно попробовать припарковаться во дворах или "
+                    "поставить автомобиль на платную городскую парковку.";
+            customer += "\n\n";
             customer += std::format(
-                    "Рекомендуем заложить несколько запасных минут (20-30) перед {}, чтобы спокойно припарковаться и добраться до нас.[[friendly: 😌 🌸]]",
-                    appointment_word);
+                    "Рекомендуем заложить несколько запасных минут (20-30) перед {}, "
+                    "чтобы спокойно припарковаться и добраться до нас. 😌{}",
+                    appointment_word,
+                    friendly_flower());
         }
 
-        auto answer = make_answer(
+        return make_answer_without_trailing_emoji(
                 config,
                 "accessible_parking",
                 append_sentence(
@@ -3158,8 +3408,6 @@ void append_requested_booking_method(booking_request_s &request,
                                     parking.accessible ? "да" : "нет"),
                         parking.accessible_note),
                 std::move(customer));
-        answer.emoji.clear();
-        return answer;
     }
 
     auto customer = std::string{};
@@ -3175,36 +3423,40 @@ void append_requested_booking_method(booking_request_s &request,
 
         if (has_free_city_parking && is_in_front_of_building) {
             customer =
-                    "Да, прямо перед зданием есть бесплатная городская парковка.[[friendly: 🅿️]]";
+                    "Да, прямо перед зданием есть бесплатная городская парковка. 🅿️";
         } else if (!parking.regular_note.empty()) {
             auto short_note = parking.regular_note;
-            if (const auto separator = short_note.find(';'); separator != std::string::npos) {
+            if (const auto separator = short_note.find(';');
+                separator != std::string::npos) {
                 short_note.erase(separator);
             }
             customer = sentence(std::format("Да, {}", lowercase_first(short_note)));
-            customer += "[[friendly: 🅿️]]";
+            customer += " 🅿️";
         } else {
-            customer = "Да, рядом есть парковка.[[friendly: 🅿️]]";
+            customer = "Да, рядом есть парковка. 🅿️";
         }
 
+        customer += "\n\n";
         customer +=
-                " Обычно свободные места есть, но в часы пик может быть плотно. Если мест не будет, можно припарковаться во дворах или поставить автомобиль на платную городскую парковку. ";
+                "Обычно свободные места есть, но в часы пик может быть плотно. Если "
+                "мест не будет, можно попробовать припарковаться во дворах или "
+                "поставить автомобиль на платную городскую парковку.";
+        customer += "\n\n";
         customer += std::format(
-                "Рекомендуем заложить несколько запасных минут (10-15) перед {}, чтобы спокойно припарковаться.[[friendly: 😌 🌸]]",
-                appointment_word);
+                "Рекомендуем заложить несколько запасных минут (10-15) перед {}, "
+                "чтобы спокойно припарковаться. 😌{}",
+                appointment_word,
+                friendly_flower());
     }
 
-    auto answer = make_answer(config,
-                              "parking",
-                              append_sentence(
-                                      std::format("Обычная парковка: {}",
-                                                  parking.regular ? "да" : "нет"),
-                                      parking.regular_note),
-                              std::move(customer));
-    if (parking.regular) {
-        answer.emoji.clear();
-    }
-    return answer;
+    return make_answer_without_trailing_emoji(
+            config,
+            "parking",
+            append_sentence(
+                    std::format("Обычная парковка: {}",
+                                parking.regular ? "да" : "нет"),
+                    parking.regular_note),
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<std::size_t> extract_centimeters(
@@ -3257,27 +3509,6 @@ void append_requested_booking_method(booking_request_s &request,
     return std::nullopt;
 }
 
-[[nodiscard]] std::string organization_visit_location(
-        const organization_config_s &config) {
-    return config.business_type == organization_business_type_e::beauty_salon
-                   ? std::string{"в нашем салоне"}
-                   : std::string{"у нас"};
-}
-
-[[nodiscard]] std::string pets_behavior_rule() {
-    return "Животное не должно быть агрессивным и вести себя слишком вызывающе";
-}
-
-[[nodiscard]] std::string pets_service_animal_behavior_rule() {
-    return
-            "Собака-проводник не должна быть агрессивной и доставлять неудобства другим клиентам";
-}
-
-[[nodiscard]] std::string pets_safety_notice() {
-    return
-            "Дополнительно предупреждаем, что у нас нет возможности внимательно следить[[friendly: 👁👁]] за тем, не съест ли с пола питомец что-то вредное или опасное для своего здоровья";
-}
-
 [[nodiscard]] std::string pets_advance_notice(
         const organization_pets_policy_s &policy) {
     if (policy.note.empty()) {
@@ -3285,25 +3516,8 @@ void append_requested_booking_method(booking_request_s &request,
     }
 
     return
-            "Если в итоге решите прийти с животным, очень просим заранее предупредить администратора, чтобы избежать недопонимания и неловких ситуаций";
-}
-
-[[nodiscard]] std::string pets_service_animal_note(
-        const organization_pets_policy_s &policy,
-        const bool has_size_limit) {
-    if (!policy.service_animals_allowed) {
-        return {};
-    }
-
-    const auto introduction = has_size_limit
-                                      ? std::string{
-                                                "Примечание: ограничение по размеру не распространяется на собак-проводников[[friendly: 🐶👩‍🦯]]"}
-                                      : std::string{
-                                                "Примечание: исключением являются только собаки-проводники[[friendly: 🐶👩‍🦯]]"};
-
-    const auto behavior = std::string{
-            "При этом собака-проводник не должна быть агрессивной и доставлять неудобства другим клиентам"};
-    return append_sentence(introduction, behavior);
+            "Пожалуйста, предупредите администратора заранее, если планируете визит "
+            "с питомцем, чтобы мы подобрали для Вас максимально уютное место";
 }
 
 [[nodiscard]] organization_config_answer_s make_pets_answer(
@@ -3318,85 +3532,60 @@ void append_requested_booking_method(booking_request_s &request,
 
 [[nodiscard]] std::string pets_allowed_rules(
         const organization_pets_policy_s &policy) {
-    auto paragraphs = std::vector<std::string>{
-            sentence(pets_behavior_rule()),
-            sentence(pets_safety_notice()),
-    };
+    auto customer = std::string{
+            "Главное, чтобы Вашему любимцу было комфортно в новой обстановке и он "
+            "спокойно отдыхал рядом с Вами во время процедуры. 🐾😌"};
 
     if (const auto notice = pets_advance_notice(policy); !notice.empty()) {
-        paragraphs.push_back(sentence(notice));
+        customer += "\n\n";
+        customer += std::format("{}. 😊{}", notice, friendly_flower());
     }
 
-    return join_strings(paragraphs, "\n\n");
+    return customer;
 }
 
 [[nodiscard]] std::string full_pets_policy_text(
         const organization_config_s &config,
         const organization_pets_policy_s &policy) {
-    const auto location = organization_visit_location(config);
+    (void) config;
     auto paragraphs = std::vector<std::string>{};
 
     if (policy.allowed) {
-        paragraphs.push_back(sentence(std::format(
-                "О, мы очень любим животных![[friendly: 🥰]] Конечно же, мы будем рады видеть Вас {} с Вашим домашним любимцем![[friendly: 🤩 🐾]] Единственное, хотелось бы отметить, что животное, в свою очередь, не должно быть агрессивным и вести себя слишком вызывающе",
-                location)));
-        paragraphs.push_back(sentence(pets_safety_notice()));
-
-        auto invitation = std::string{
-                "А так, если всё хорошо, ждём не только Вас, но и Вашего друга[[friendly: 🐾😊 🌸]]"};
-
-        if (const auto notice = pets_advance_notice(policy); !notice.empty()) {
-            invitation = append_sentence(std::move(invitation), notice);
-        }
-
-        paragraphs.push_back(std::move(invitation));
-
-        if (policy.service_animals_allowed) {
-            paragraphs.push_back(sentence(
-                    "Примечание: указанные правила поведения распространяются и на собак-проводников[[friendly: 🐶👩‍🦯]]"));
-        }
-
-        return join_strings(paragraphs, "\n\n");
+        paragraphs.push_back("Мы очень любим животных и всегда рады хвостикам! 🥰");
+        paragraphs.push_back(
+                "К нам можно прийти с домашним любимцем. Главное, чтобы ему было "
+                "комфортно в новой обстановке и он спокойно отдыхал рядом с Вами "
+                "во время процедуры. 🐾😌");
+    } else if (policy.small_dogs_allowed) {
+        paragraphs.push_back("Мы очень любим животных и всегда рады хвостикам! 🥰");
+        paragraphs.push_back(policy.max_dog_height_cm.has_value()
+                                     ? std::format(
+                                               "К нам можно прийти с небольшой собачкой "
+                                               "(до {} см в холке). Главное, чтобы Вашему "
+                                               "любимцу было комфортно в новой обстановке "
+                                               "и он спокойно отдыхал рядом с Вами во "
+                                               "время процедуры. 🐾😌",
+                                               *policy.max_dog_height_cm)
+                                     : std::string{
+                                               "К нам можно прийти с небольшой собачкой. "
+                                               "Главное, чтобы Вашему любимцу было "
+                                               "комфортно в новой обстановке и он спокойно "
+                                               "отдыхал рядом с Вами во время процедуры. 🐾😌"});
+    } else {
+        paragraphs.push_back(
+                "Мы очень любим животных, но посещение с домашними питомцами у нас, "
+                "к сожалению, не предусмотрено. 😌");
     }
 
-    if (policy.small_dogs_allowed) {
-        const auto allowed_pet = policy.max_dog_height_cm.has_value()
-                                         ? std::format("небольшой собакой высотой до {} см",
-                                                       *policy.max_dog_height_cm)
-                                         : std::string{"небольшой собакой"};
-
-        paragraphs.push_back(sentence(std::format(
-                "О, мы очень любим животных![[friendly: 🥰]] Конечно же, мы будем рады видеть Вас {} с Вашим домашним любимцем![[friendly: 🤩 🐾]] Однако есть некоторые ограничения, о которых важно сказать. Например, к нам можно прийти с {}. Также животное не должно быть агрессивным и вести себя слишком вызывающе",
-                location,
-                allowed_pet)));
-        paragraphs.push_back(sentence(pets_safety_notice()));
-
-        auto invitation = std::string{
-                "А так, если всё хорошо, ждём не только Вас, но и Вашего друга[[friendly: 🐾😊 🌸]]"};
-
-        if (const auto notice = pets_advance_notice(policy); !notice.empty()) {
-            invitation = append_sentence(std::move(invitation), notice);
-        }
-
-        paragraphs.push_back(std::move(invitation));
-
-        if (const auto note = pets_service_animal_note(policy, true); !note.empty()) {
-            paragraphs.push_back(note);
-        }
-
-        return join_strings(paragraphs, "\n\n");
+    if (policy.service_animals_allowed) {
+        paragraphs.push_back(
+                "Конечно, ограничение по размеру не касается собак-поводырей — им мы "
+                "рады всегда и в любом формате. 🐶👩‍🦯");
     }
 
-    paragraphs.push_back(sentence(std::format(
-            "О, мы очень любим животных![[friendly: 🥰]] Но, к сожалению, {} запрещено присутствие с любыми домашними любимцами в связи с тем, что это может доставить моральный и/или физический дискомфорт другим клиентам",
-            location)));
-    paragraphs.push_back(sentence(
-            "Помимо этого, тоже довольно важный момент: у нас нет возможности внимательно следить[[friendly: 👁👁]] за тем, не съест ли с пола питомец что-то вредное или опасное для своего здоровья"));
-    paragraphs.push_back(sentence(
-            "Надеемся на Ваше понимание[[friendly: 😊 🌸]]"));
-
-    if (const auto note = pets_service_animal_note(policy, false); !note.empty()) {
-        paragraphs.push_back(note);
+    if (const auto notice = pets_advance_notice(policy); !notice.empty() &&
+        (policy.allowed || policy.small_dogs_allowed || policy.service_animals_allowed)) {
+        paragraphs.push_back(std::format("{}. 😊{}", notice, friendly_flower()));
     }
 
     return join_strings(paragraphs, "\n\n");
@@ -3412,168 +3601,125 @@ void append_requested_booking_method(booking_request_s &request,
                                      {"заранее", "администратор", "животн", "питом", "собак", "кошк"});
 
     if (asks_advance_notice && !policy.note.empty()) {
-        auto customer = sentence(std::format("Да, {}",
-                                             lowercase_first(pets_advance_notice(policy))));
-        customer = append_sentence(std::move(customer), pets_behavior_rule());
-        return make_pets_answer(config,
-                                "О посещении с животным нужно заранее предупредить администратора",
-                                std::move(customer),
-                                "🐾 😊 🌸");
+        auto customer = std::format(
+                "Да, {}. 😊{}",
+                lowercase_first(pets_advance_notice(policy)),
+                friendly_flower());
+        return make_pets_answer(
+                config,
+                "О посещении с животным нужно заранее предупредить администратора",
+                std::move(customer),
+                {});
     }
 
     const auto requested_height = extract_centimeters(normalized_query);
     const auto asks_service_animal = contains_any_word_prefix(normalized_query,
-                                                              {
-                                                                      "проводник",
-                                                                      "поводыр",
-                                                                      "служебн",
-                                                                  });
+                                                              {"проводник", "поводыр", "служебн"});
     const auto asks_small_dog = contains_any_word_prefix(normalized_query,
-                                                         {
-                                                                 "маленьк",
-                                                                 "небольш",
-                                                                 "миниатюр",
-                                                             }) &&
+                                                         {"маленьк", "небольш", "миниатюр"}) &&
                                 contains_any_word_prefix(normalized_query,
-                                                         {
-                                                                 "собак",
-                                                                 "собач",
-                                                                 "пес",
-                                                             });
+                                                         {"собак", "собач", "пес"});
     const auto asks_large_dog = contains_any_word_prefix(normalized_query,
-                                                         {
-                                                                 "крупн",
-                                                                 "больш",
-                                                             }) &&
+                                                         {"крупн", "больш"}) &&
                                 contains_any_word_prefix(normalized_query,
-                                                         {
-                                                                 "собак",
-                                                                 "собач",
-                                                                 "пес",
-                                                             });
+                                                         {"собак", "собач", "пес"});
 
     if (asks_service_animal) {
         const auto allowed = policy.allowed || policy.service_animals_allowed;
         auto customer = allowed
-                                ? std::string{"Да, посещение с собакой-проводником разрешено"}
+                                ? std::string{
+                                          "Да, к нам можно прийти с собакой-поводырём. "
+                                          "Мы постараемся сделать визит максимально "
+                                          "комфортным для Вас и Вашего помощника. 🐶👩‍🦯"}
                                 : std::string{
-                                          "К сожалению, посещение с собакой-проводником не предусмотрено"};
+                                          "К сожалению, посещение с собакой-поводырём "
+                                          "у нас не предусмотрено"};
 
         if (allowed) {
-            customer = append_sentence(std::move(customer),
-                                       pets_service_animal_behavior_rule());
-
             if (const auto notice = pets_advance_notice(policy); !notice.empty()) {
                 customer += "\n\n";
-                customer += sentence(notice);
+                customer += std::format("{}. 😊{}", notice, friendly_flower());
             }
         }
 
         return make_pets_answer(config,
-                                std::format("Собака-проводник: {}",
+                                std::format("Собака-поводырь: {}",
                                             allowed ? "разрешена" : "не разрешена"),
                                 std::move(customer),
-                                allowed ? "🐶 👩‍🦯 😊 🌸" : "😞");
+                                {});
     }
+
+    const auto short_small_dog_answer = [&]() {
+        auto customer = policy.max_dog_height_cm.has_value() && !policy.allowed
+                                ? std::format(
+                                          "Да, к нам можно прийти с небольшой собачкой "
+                                          "(до {} см в холке). ",
+                                          *policy.max_dog_height_cm)
+                                : std::string{
+                                          "Да, к нам можно прийти с небольшой собачкой. "};
+        customer += pets_allowed_rules(policy);
+        return customer;
+    };
 
     if (requested_height.has_value() && policy.max_dog_height_cm.has_value()) {
         const auto allowed = policy.allowed ||
                              (policy.small_dogs_allowed &&
                               *requested_height <= *policy.max_dog_height_cm);
-        auto customer = allowed
-                                ? (policy.allowed
-                                           ? std::format("Да, можно прийти с собакой высотой {} см",
-                                                         *requested_height)
-                                           : std::format(
-                                                     "Да, можно прийти с собакой высотой до {} см",
-                                                     *policy.max_dog_height_cm))
-                                : std::format(
-                                          "К сожалению, к нам можно только с небольшой собакой высотой до {} см",
-                                          *policy.max_dog_height_cm);
-        if (!allowed) {
-            return make_pets_answer(
-                    config,
-                    std::format("Собака высотой {} см: не разрешена",
-                                *requested_height),
-                    full_pets_policy_text(config, policy),
-                    {});
+
+        if (allowed) {
+            return make_pets_answer(config,
+                                    std::format("Собака высотой {} см: разрешена",
+                                                *requested_height),
+                                    short_small_dog_answer(),
+                                    {});
         }
 
-        customer = sentence(std::move(customer));
-        customer += "\n\n";
-        customer += pets_allowed_rules(policy);
-
+        auto customer = std::format(
+                "К сожалению, к нам можно прийти только с небольшой собачкой до {} см "
+                "в холке. 🐾😌",
+                *policy.max_dog_height_cm);
+        if (const auto notice = pets_advance_notice(policy); !notice.empty()) {
+            customer += "\n\n";
+            customer += std::format("{}. 😊{}", notice, friendly_flower());
+        }
         return make_pets_answer(config,
-                                std::format("Собака высотой {} см: разрешена",
+                                std::format("Собака высотой {} см: не разрешена",
                                             *requested_height),
                                 std::move(customer),
-                                "🥰 🐾 😊 🌸");
+                                {});
     }
 
     if (asks_small_dog) {
         const auto allowed = policy.allowed || policy.small_dogs_allowed;
-        auto customer = std::string{};
-
-        if (allowed) {
-            customer = policy.max_dog_height_cm.has_value() && !policy.allowed
-                               ? std::format(
-                                         "Да, можно прийти с небольшой собакой высотой до {} см",
-                                         *policy.max_dog_height_cm)
-                               : std::string{"Да, можно прийти с небольшой собакой"};
-            customer = sentence(std::move(customer));
-            customer += "\n\n";
-            customer += pets_allowed_rules(policy);
-        } else {
-            return make_pets_answer(config,
-                                    "Небольшая собака: не разрешена",
-                                    full_pets_policy_text(config, policy),
-                                    {});
-        }
-
         return make_pets_answer(config,
-                                "Небольшая собака: разрешена",
-                                std::move(customer),
-                                "🥰 🐾 😊 🌸");
+                                allowed ? "Небольшая собака: разрешена"
+                                        : "Небольшая собака: не разрешена",
+                                allowed ? short_small_dog_answer()
+                                        : full_pets_policy_text(config, policy),
+                                {});
     }
 
-    if (asks_large_dog) {
-        const auto allowed = policy.allowed;
-        if (!allowed) {
-            return make_pets_answer(config,
-                                    "Крупная собака: не разрешена",
-                                    full_pets_policy_text(config, policy),
-                                    {});
-        }
-
-        auto customer = sentence("Да, к нам можно с крупной собакой");
-        customer += "\n\n";
-        customer += pets_allowed_rules(policy);
-
+    if (asks_large_dog && !policy.allowed) {
         return make_pets_answer(config,
-                                "Крупная собака: разрешена",
-                                std::move(customer),
-                                "🥰 🐾 😊 🌸");
+                                "Крупная собака: не разрешена",
+                                full_pets_policy_text(config, policy),
+                                {});
     }
 
     auto fact = std::string{};
-
     if (policy.allowed) {
-        fact = "Посещение с животными разрешено при соблюдении правил поведения";
+        fact = "Посещение с животными разрешено";
     } else if (policy.small_dogs_allowed) {
         fact = policy.max_dog_height_cm.has_value()
                        ? std::format("Разрешены небольшие собаки высотой до {} см",
                                      *policy.max_dog_height_cm)
                        : std::string{"Разрешены небольшие собаки"};
-
-        if (policy.service_animals_allowed) {
-            fact = append_sentence(std::move(fact), "Собаки-проводники разрешены");
-        }
     } else {
         fact = "Посещение с домашними животными запрещено";
+    }
 
-        if (policy.service_animals_allowed) {
-            fact = append_sentence(std::move(fact), "Собаки-проводники разрешены");
-        }
+    if (policy.service_animals_allowed) {
+        fact = append_sentence(std::move(fact), "Собаки-поводыри разрешены");
     }
 
     return make_pets_answer(config,
@@ -3779,14 +3925,7 @@ struct beauty_direction_view_s {
 
 [[nodiscard]] std::vector<std::string> customer_service_alternative_labels(
         const std::vector<std::string> &alternatives) {
-    auto labels = std::vector<std::string>{};
-    labels.reserve(alternatives.size());
-
-    for (const auto &alternative : alternatives) {
-        labels.push_back(with_friendly_emoji(alternative, emoji_kind_e::services));
-    }
-
-    return labels;
+    return alternatives;
 }
 
 [[nodiscard]] std::string customer_service_unavailable_text(
@@ -3796,10 +3935,53 @@ struct beauty_direction_view_s {
         return sentence(std::move(unavailable_text));
     }
 
-    return std::format(
-            "{}, но мы можем предложить другие наши услуги:\n{}",
+    auto customer = std::format(
+            "{}. Из близких вариантов можем предложить:\n{}",
             unavailable_text,
             em_dash_list(customer_service_alternative_labels(alternatives)));
+    customer += "\n\n";
+    customer += nearby_slots_offer();
+    return customer;
+}
+
+[[nodiscard]] std::string customer_globally_unavailable_service_text(
+        const std::vector<std::string> &alternatives) {
+    auto customer = std::string{
+            "К сожалению, данные услуги мы не оказываем, но мы с радостью приглашаем "
+            "Вас на другие наши процедуры, которые помогут подчеркнуть Вашу красоту:"};
+
+    if (!alternatives.empty()) {
+        customer += "\n\n";
+        customer += em_dash_list(alternatives);
+    }
+
+    customer += "\n\n";
+    customer += service_selection_offer();
+    return customer;
+}
+
+[[nodiscard]] std::string podology_unavailable_customer_text(
+        const organization_config_s &config) {
+    const auto &directions = config.business_details.beauty_salon.service_directions;
+
+    if (!directions.pedicure) {
+        return customer_globally_unavailable_service_text(
+                available_service_labels(config));
+    }
+
+    auto customer = std::string{
+            "Медицинские услуги подолога в нашем салоне не предоставляются, но мы с "
+            "радостью поможем Вам с эстетическим уходом! 🤩✨"};
+    customer += "\n\n";
+    customer +=
+            "Наш мастер может сделать бережный педикюр, аккуратно обработать пальчики "
+            "и стопы. 👣 Покрытие гель-лаком выберем по Вашему желанию!";
+    customer += "\n\n";
+    customer += std::format(
+            "Если у Вас нет глубоких медицинских проблем, будем рады позаботиться о "
+            "Ваших ножках. Посмотреть для Вас свободные окошки на педикюр? 😊{}",
+            friendly_flower());
+    return customer;
 }
 
 [[nodiscard]] std::string customer_service_collection(
@@ -3858,21 +4040,37 @@ struct beauty_direction_view_s {
     }
 
     if (!direction_it->enabled) {
-        const auto alternatives = available_service_labels(config);
+        auto alternatives = available_service_labels_for_directions(
+                config,
+                std::vector<std::string_view>{direction_id});
+        const auto has_close_alternatives = !alternatives.empty();
+
+        if (!has_close_alternatives) {
+            alternatives = available_service_labels(config);
+        }
+
         auto fact = append_service_alternatives(
                 std::format("Направление '{}' отключено в конфигурации",
                             direction_it->label),
                 alternatives,
-                "Доступные альтернативные услуги");
-        auto customer = customer_service_unavailable_text(
-                std::format("{} в нашем салоне пока не представлены",
-                            capitalize_first(std::string{direction_it->unavailable_label})),
-                alternatives);
+                has_close_alternatives ? "Доступные близкие услуги"
+                                       : "Другие доступные услуги");
+        auto customer = direction_id == "podology"
+                                ? podology_unavailable_customer_text(config)
+                                : has_close_alternatives
+                                          ? customer_service_unavailable_text(
+                                                    std::format(
+                                                            "{} в нашем салоне пока не представлены",
+                                                            capitalize_first(std::string{
+                                                                    direction_it->unavailable_label})),
+                                                    alternatives)
+                                          : customer_globally_unavailable_service_text(
+                                                    alternatives);
 
-        return make_answer(config,
-                           "service_direction",
-                           std::move(fact),
-                           std::move(customer));
+        return make_answer_without_trailing_emoji(config,
+                                                  "service_direction",
+                                                  std::move(fact),
+                                                  std::move(customer));
     }
 
     auto names = std::vector<std::string>{};
@@ -3888,25 +4086,29 @@ struct beauty_direction_view_s {
     }
 
     if (names.empty()) {
-        return make_answer(config,
-                           "service_direction",
-                           std::format("Направление '{}' включено, но связанные услуги не указаны",
-                                       direction_it->label),
-                           std::format("Мы работаем с {}, но конкретный перечень услуг пока не указан",
-                                       direction_it->related_label));
+        return make_answer_without_trailing_emoji(
+                config,
+                "service_direction",
+                std::format("Направление '{}' включено, но связанные услуги не указаны",
+                            direction_it->label),
+                std::format("Мы работаем с {}, но конкретный перечень услуг пока не указан",
+                            direction_it->related_label));
     }
 
     const auto heading = std::format(
             "Среди услуг, связанных с {}, можем предложить",
             direction_it->related_label);
-    const auto customer = customer_service_collection(heading, names);
+    auto customer = customer_service_collection(heading, names);
+    customer += "\n\n";
+    customer += service_selection_offer();
 
-    return make_answer(config,
-                       "service_direction",
-                       std::format("Услуги направления '{}':\n{}",
-                                   direction_it->label,
-                                   em_dash_list(names)),
-                       customer);
+    return make_answer_without_trailing_emoji(
+            config,
+            "service_direction",
+            std::format("Услуги направления '{}':\n{}",
+                        direction_it->label,
+                        em_dash_list(names)),
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> directions_services_answer(
@@ -3940,7 +4142,6 @@ struct beauty_direction_view_s {
 [[nodiscard]] std::optional<organization_config_answer_s> services_answer(
         const organization_config_s &config) {
     const auto *services = active_services(config);
-    auto matches = std::vector<service_match_s>{};
 
     if (services == nullptr || services->empty()) {
         return std::nullopt;
@@ -3959,19 +4160,22 @@ struct beauty_direction_view_s {
         return std::nullopt;
     }
 
+    auto customer = std::string{};
     if (display_names.size() >= 3) {
-        const auto body = em_dash_list(display_names);
-        return make_answer(config,
-                           "services",
-                           text_section("Доступные услуги", body),
-                           text_section("Мы можем предложить следующие услуги", body));
+        customer = text_section("Мы можем предложить следующие услуги",
+                                em_dash_list(display_names));
+    } else {
+        customer = std::format("Мы можем предложить следующие услуги: {}",
+                               join_human_readable(display_names));
     }
+    customer += "\n\n";
+    customer += service_selection_offer();
 
-    const auto joined = join_human_readable(display_names);
-    return make_answer(config,
-                       "services",
-                       std::format("В организации доступны услуги: {}", joined),
-                       std::format("Мы можем предложить следующие услуги: {}", joined));
+    return make_answer_without_trailing_emoji(
+            config,
+            "services",
+            text_section("Доступные услуги", em_dash_list(display_names)),
+            std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> products_answer(
@@ -4403,6 +4607,98 @@ struct beauty_direction_view_s {
     return matches.empty() ? nullptr : matches.front().service;
 }
 
+[[nodiscard]] std::optional<organization_service_minor_access_s>
+effective_minor_access(
+        const organization_config_s &config,
+        const organization_service_s &service) {
+    if (service.minor_access.has_value()) {
+        return service.minor_access;
+    }
+
+    if (config.business_type != organization_business_type_e::beauty_salon) {
+        return std::nullopt;
+    }
+
+    const auto &salon = config.business_details.beauty_salon;
+    auto result = organization_service_minor_access_s{};
+
+    for (const auto &direction : service.directions) {
+        if (beauty_direction_is_child(direction)) {
+            continue;
+        }
+
+        const auto child_direction_id = std::format("child_{}", direction);
+        const auto *child = beauty_child_direction(salon.service_directions,
+                                                   child_direction_id);
+
+        if (child == nullptr || !child->available || !child->min_age.has_value()) {
+            continue;
+        }
+
+        const auto has_explicit_child_service = std::ranges::any_of(
+                salon.services,
+                [&](const organization_service_s &candidate) {
+                    return &candidate != &service &&
+                           service_has_direction(candidate, child_direction_id);
+                });
+
+        if (has_explicit_child_service) {
+            continue;
+        }
+
+        result.allowed = true;
+        if (!result.min_age.has_value() || *child->min_age < *result.min_age) {
+            result.min_age = child->min_age;
+        }
+    }
+
+    return result.allowed
+                   ? std::optional<organization_service_minor_access_s>{result}
+                   : std::nullopt;
+}
+
+[[nodiscard]] bool service_is_available_for_minor(
+        const organization_config_s &config,
+        const organization_service_s &service) {
+    const auto access = effective_minor_access(config, service);
+    if (!access.has_value() || !access->allowed) {
+        return false;
+    }
+
+    if (config.business_type != organization_business_type_e::beauty_salon) {
+        return service_is_available(config, service);
+    }
+
+    const auto &directions = config.business_details.beauty_salon.service_directions;
+    auto has_child_direction = false;
+
+    for (const auto &direction : service.directions) {
+        if (!beauty_direction_is_child(direction)) {
+            continue;
+        }
+
+        has_child_direction = true;
+        if (beauty_direction_enabled(directions, direction)) {
+            return true;
+        }
+    }
+
+    return !has_child_direction && service_is_available(config, service);
+}
+
+[[nodiscard]] std::string minor_service_list_label(
+        const organization_config_s &config,
+        const organization_service_s &service) {
+    auto label = service.name;
+    const auto access = effective_minor_access(config, service);
+
+    if (access.has_value() && access->allowed && access->min_age.has_value()) {
+        label += std::format(" (от {} лет)", *access->min_age);
+    }
+
+    return label;
+}
+
 [[nodiscard]] const organization_service_s *find_matching_minor_service(
         const organization_config_s &config,
         const std::string_view normalized_query) noexcept {
@@ -4416,7 +4712,7 @@ struct beauty_direction_view_s {
     auto best_score = std::size_t{0};
 
     for (const auto &service : *services) {
-        if (!service_is_available(config, service) || (!service.minor_access.has_value() || !service.minor_access->allowed)) {
+        if (!service_is_available_for_minor(config, service)) {
             continue;
         }
 
@@ -4443,8 +4739,7 @@ struct beauty_direction_view_s {
     auto best_candidate_size = std::size_t{0};
 
     for (const auto &service : *services) {
-        if (!service_is_available(config, service) ||
-            !service.minor_access.has_value() || !service.minor_access->allowed) {
+        if (!service_is_available_for_minor(config, service)) {
             continue;
         }
 
@@ -4563,33 +4858,34 @@ generic_unavailable_service_direction_answer(
         const std::string_view normalized_query,
         const bool allow_missing_answer) {
     const auto *services = active_services(config);
-    auto matches = std::vector<service_match_s>{};
 
     if (services == nullptr || services->empty()) {
         return std::nullopt;
     }
 
+    const auto available_answer = [&](const organization_service_s &service) {
+        const auto quoted_name = std::format("«{}»", service.name);
+        auto customer = std::format("Да, у нас можно сделать {}", quoted_name);
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+        return make_answer_without_trailing_emoji(
+                config,
+                "service_availability",
+                std::format("Услуга {} есть в перечне доступных услуг организации",
+                            quoted_name),
+                std::move(customer));
+    };
+
     if (manicure_without_coating_intent(normalized_query)) {
         if (const auto *service = find_manicure_without_coating_service(config);
             service != nullptr) {
-            const auto quoted_name = std::format("«{}»", service->name);
-            return make_answer(config,
-                               "service_availability",
-                               std::format("Услуга {} есть в перечне доступных услуг организации",
-                                           quoted_name),
-                               std::format("Да, у нас можно сделать {}", quoted_name));
+            return available_answer(*service);
         }
     }
 
     if (const auto *service = find_matching_service(config, normalized_query);
         service != nullptr) {
-        const auto quoted_name = std::format("«{}»", service->name);
-
-        return make_answer(config,
-                           "service_availability",
-                           std::format("Услуга {} есть в перечне доступных услуг организации",
-                                       quoted_name),
-                           std::format("Да, у нас можно сделать {}", quoted_name));
+        return available_answer(*service);
     }
 
     if (const auto *service = find_matching_service(config, normalized_query, true);
@@ -4614,7 +4910,9 @@ generic_unavailable_service_direction_answer(
                 config,
                 direction_ids,
                 service);
-        if (alternatives.empty()) {
+        const auto has_close_alternatives = !alternatives.empty();
+
+        if (!has_close_alternatives) {
             alternatives = available_service_labels(config, service);
         }
 
@@ -4623,15 +4921,23 @@ generic_unavailable_service_direction_answer(
                 std::format("Услуга {} связана только с отключённым направлением",
                             quoted_name),
                 alternatives,
-                "Доступные альтернативные услуги");
-        auto customer = customer_service_unavailable_text(
-                std::format("Услугу {} мы пока не оказываем", quoted_name),
-                alternatives);
+                has_close_alternatives ? "Доступные близкие услуги"
+                                       : "Другие доступные услуги");
+        auto customer = service_has_direction(*service, "podology")
+                                ? podology_unavailable_customer_text(config)
+                                : has_close_alternatives
+                                          ? customer_service_unavailable_text(
+                                                    std::format(
+                                                            "Услугу {} мы пока не оказываем",
+                                                            quoted_name),
+                                                    alternatives)
+                                          : customer_globally_unavailable_service_text(
+                                                    alternatives);
 
-        return make_answer(config,
-                           "service_availability",
-                           std::move(fact),
-                           std::move(customer));
+        return make_answer_without_trailing_emoji(config,
+                                                  "service_availability",
+                                                  std::move(fact),
+                                                  std::move(customer));
     }
 
     if (!allow_missing_answer) {
@@ -4639,24 +4945,20 @@ generic_unavailable_service_direction_answer(
     }
 
     const auto direction_ids = beauty_directions_from_query(normalized_query);
-    auto alternatives = available_service_labels_for_directions(config,
-                                                                  direction_ids);
-    if (alternatives.empty()) {
-        alternatives = available_service_labels(config);
-    }
-
+    const auto alternatives = available_service_labels_for_directions(config,
+                                                                        direction_ids);
     auto fact = append_service_alternatives(
             "Запрошенная услуга отсутствует в настроенном перечне услуг",
             alternatives,
-            "Доступные альтернативные услуги");
+            "Доступные близкие услуги");
     auto customer = customer_service_unavailable_text(
             "Такой услуги в нашем перечне пока нет",
             alternatives);
 
-    return make_answer(config,
-                       "service_availability",
-                       std::move(fact),
-                       std::move(customer));
+    return make_answer_without_trailing_emoji(config,
+                                              "service_availability",
+                                              std::move(fact),
+                                              std::move(customer));
 }
 
 [[nodiscard]] std::optional<std::size_t> extract_requested_age(
@@ -4706,11 +5008,330 @@ generic_unavailable_service_direction_answer(
                                         });
 }
 
+[[nodiscard]] std::string parent_presence_fact_text(
+        const organization_general_amenities_s &amenities) {
+    if (amenities.minor_parent_presence_required) {
+        return "Во время процедуры требуется присутствие родителя или законного представителя";
+    }
+
+    return std::format(
+            "Дети младше {} лет обслуживаются только в присутствии родителя или "
+            "законного представителя",
+            amenities.minor_child_visit_with_parent_until_age);
+}
+
 [[nodiscard]] std::string parent_presence_text(
         const organization_general_amenities_s &amenities) {
-    return amenities.minor_parent_presence_required
-                   ? "Во время процедуры требуется присутствие родителя или законного представителя"
-                   : "Постоянное присутствие родителя или законного представителя во время процедуры не требуется";
+    if (amenities.minor_parent_presence_required) {
+        return "Во время процедуры требуется присутствие родителя или законного "
+               "представителя. 🧒";
+    }
+
+    auto customer = std::format(
+            "Мы принимаем детей до {} лет только в присутствии родителя или законного "
+            "представителя. 🧒",
+            amenities.minor_child_visit_with_parent_until_age);
+    customer += "\n\n";
+    customer += std::format(
+            "Если Ваш ребёнок старше {} лет, Вы можете оставить его на время процедуры "
+            "и заняться своими делами. Мы обо всём позаботимся! 😊{}",
+            amenities.minor_child_visit_with_parent_until_age,
+            friendly_flower());
+    return customer;
+}
+
+[[nodiscard]] std::string minor_parent_presence_paragraph(
+        const organization_general_amenities_s &amenities) {
+    return std::format(
+            "По правилам нашего салона, детей до {} лет мы обслуживаем исключительно "
+            "в присутствии родителя или законного представителя. Поэтому мы будем "
+            "очень рады видеть Вас вместе! 👩🧒👨",
+            amenities.minor_child_visit_with_parent_until_age);
+}
+
+[[nodiscard]] std::string minor_parental_consent_paragraph(
+        const organization_general_amenities_s &amenities,
+        const std::string_view procedure) {
+    if (amenities.minor_parental_consent_from_age >
+        amenities.minor_parental_consent_until_age) {
+        return {};
+    }
+
+    return std::format(
+            "Для гостей от {} до {} лет {} нам также понадобится согласие родителей. ☝️",
+            amenities.minor_parental_consent_from_age,
+            amenities.minor_parental_consent_until_age,
+            procedure);
+}
+
+[[nodiscard]] bool child_manicure_service(
+        const organization_service_s &service) noexcept {
+    return service_has_direction(service, "child_manicure");
+}
+
+[[nodiscard]] std::vector<std::string> minor_service_labels_for_age(
+        const organization_config_s &config,
+        const std::size_t age,
+        const organization_service_s *excluded_service = nullptr) {
+    auto result = std::vector<std::string>{};
+    const auto *services = active_services(config);
+
+    if (services == nullptr) {
+        return result;
+    }
+
+    for (const auto &service : *services) {
+        const auto access = effective_minor_access(config, service);
+        if (&service == excluded_service ||
+            !service_is_available_for_minor(config, service) ||
+            !access.has_value() || access->min_age.value_or(18) > age) {
+            continue;
+        }
+
+        const auto label = minor_service_list_label(config, service);
+        if (std::ranges::find(result, label) == result.end()) {
+            result.push_back(label);
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] std::string manicure_minor_policy_text(
+        const organization_general_amenities_s &amenities) {
+    auto customer = std::format(
+            "По правилам заботы о здоровье, стойкое «покрытие гель-лаком» и "
+            "«наращивание» мы делаем только с {} лет. До этого возраста ногтевая "
+            "пластина ещё слишком мягкая, и мы оберегаем пальчики подростков от "
+            "агрессивных составов. 😌✨",
+            amenities.minor_nail_coating_min_age);
+
+    if (amenities.minor_parental_consent_from_age <=
+        amenities.minor_parental_consent_until_age) {
+        customer += std::format(
+                " А для гостей от {} до {} лет нам понадобится согласие родителей. ☝️",
+                amenities.minor_parental_consent_from_age,
+                amenities.minor_parental_consent_until_age);
+    }
+
+    return customer;
+}
+
+[[nodiscard]] std::optional<organization_config_answer_s>
+specialized_minor_service_answer(
+        const organization_config_s &config,
+        const organization_service_s &service,
+        const std::optional<std::size_t> requested_age,
+        const std::size_t min_age) {
+    const auto &amenities = config.general_amenities;
+    const auto quoted_name = std::format("«{}»", service.name);
+    auto customer = std::string{};
+    auto fact = std::format("Услуга {} доступна несовершеннолетним с {} лет",
+                            quoted_name,
+                            min_age);
+
+    const auto below_minimum = requested_age.has_value() && *requested_age < min_age;
+    const auto age_prefix = requested_age.has_value()
+                                    ? std::format("В {} лет", *requested_age)
+                                    : std::string{};
+
+    if (service_matches_direction_family(service, "child_brows")) {
+        customer =
+                "Да, конечно! Мы с радостью поможем подчеркнуть естественную красоту "
+                "бровей Вашего ребёнка. 🌿✨";
+        customer += "\n\n";
+        customer += std::format(
+                "До {} лет мы предлагаем только самый бережный уход: лёгкое оформление "
+                "пинцетом без перещипывания и деликатную укладку гелем. Окрашивание "
+                "стойкой краской, хной или ламинирование мы делаем с {} лет, так как "
+                "до этого возраста кожа и волоски ещё слишком нежные. 🌸",
+                min_age,
+                min_age);
+        customer += "\n\n";
+        customer += minor_parent_presence_paragraph(amenities);
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на окрашивание или ламинирование");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += "Записать Вас на консультацию или подобрать удобное время? 😊";
+        fact = std::format(
+                "Бережное оформление бровей возможно до {} лет; стойкое окрашивание и "
+                "ламинирование выполняются с {} лет",
+                min_age,
+                min_age);
+    } else if (service_matches_direction_family(service, "child_eyelashes")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} наращивание и ламинирование ресниц мы пока не выполняем. Эти "
+                    "процедуры доступны с {} лет, когда кожа век и натуральные ресницы "
+                    "становятся менее чувствительными. 😌✨",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, наращивание и ламинирование ресниц доступны юным гостям с {} "
+                    "лет. Перед процедурой лэшмейкер оценит состояние натуральных "
+                    "ресниц и подберёт максимально деликатный вариант. 👁✨",
+                    min_age);
+        }
+        customer += "\n\n";
+        customer += minor_parent_presence_paragraph(amenities);
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на наращивание или ламинирование ресниц");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_hairdressing")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} детскую стрижку у нас пока не проводят — мы принимаем юных "
+                    "гостей на эту услугу с {} лет. 😌",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, детские стрижки доступны с {} лет. Мастер спокойно познакомит "
+                    "ребёнка с процедурой, уточнит пожелания и подберёт удобную форму "
+                    "стрижки. ✂️😊",
+                    min_age);
+        }
+        customer += "\n\n";
+        customer += minor_parent_presence_paragraph(amenities);
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_pedicure")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} педикюр с покрытием мы пока не выполняем. Бережная процедура "
+                    "для подростков доступна с {} лет. 😌✨",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, подростковый педикюр доступен с {} лет. Мастер бережно "
+                    "обработает ногти и стопы, а формат покрытия подберёт с учётом "
+                    "возраста и состояния ногтевой пластины. 👣✨",
+                    min_age);
+        }
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на педикюр с покрытием");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_cosmetology")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} косметологические процедуры в салоне пока не проводятся. "
+                    "Бережные возрастные уходы доступны с {} лет после консультации. "
+                    "😌🌿",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, с {} лет мы можем подобрать подростку бережный неинвазивный "
+                    "уход за кожей. Перед записью специалист уточнит состояние кожи и "
+                    "подберёт подходящий формат процедуры. 🌿✨",
+                    min_age);
+        }
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на косметологическую процедуру");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_hair_removal")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} процедуры удаления волос у нас пока не проводятся. Подбор "
+                    "бережного метода возможен с {} лет после предварительной "
+                    "консультации. 😌",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, услуги удаления волос доступны несовершеннолетним с {} лет. "
+                    "Перед процедурой мастер уточнит особенности кожи и подберёт "
+                    "максимально бережный метод. 🌿✨",
+                    min_age);
+        }
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на процедуру удаления волос");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_makeup")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} профессиональный макияж у нас пока не выполняется — услуга "
+                    "доступна с {} лет. 😌",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, макияж для юных гостей доступен с {} лет. Визажист подберёт "
+                    "лёгкий и уместный образ, учитывая возраст, повод и пожелания "
+                    "гостя. 💄✨",
+                    min_age);
+        }
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на профессиональный макияж");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else if (service_matches_direction_family(service, "child_massage")) {
+        if (below_minimum) {
+            customer = std::format(
+                    "{} массаж в нашем салоне пока не проводится — бережные программы "
+                    "для подростков доступны с {} лет. 😌",
+                    age_prefix,
+                    min_age);
+        } else {
+            customer = std::format(
+                    "Да, массаж для подростков доступен с {} лет. Специалист уточнит "
+                    "самочувствие и подберёт мягкий формат без чрезмерной нагрузки. "
+                    "🌿😌",
+                    min_age);
+        }
+        if (const auto consent = minor_parental_consent_paragraph(
+                    amenities,
+                    "на массаж");
+            !consent.empty()) {
+            customer += "\n\n";
+            customer += consent;
+        }
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+    } else {
+        return std::nullopt;
+    }
+
+    return make_answer_without_trailing_emoji(config,
+                                              "minors",
+                                              std::move(fact),
+                                              std::move(customer));
 }
 
 [[nodiscard]] std::optional<organization_config_answer_s> minors_answer(
@@ -4720,10 +5341,8 @@ generic_unavailable_service_direction_answer(
     const auto requested_age = extract_requested_age(normalized_query);
     const auto asks_parent_presence = parent_presence_intent(normalized_query);
     const auto asks_minimum_age = contains_any(normalized_query,
-                                               {
-                                                       "с какого возраста",
-                                                       "минимальный возраст",
-                                                   });
+                                               {"с какого возраста",
+                                                "минимальный возраст"});
     const auto *exact_minor_service = find_exact_matching_minor_service(
             config,
             normalized_query);
@@ -4739,116 +5358,253 @@ generic_unavailable_service_direction_answer(
 
     if (service == nullptr) {
         if (!amenities.serves_minors) {
-            return make_answer(config,
-                               "minors",
-                               "Обслуживание несовершеннолетних не предусмотрено",
-                               "Услуги для несовершеннолетних не предусмотрены");
+            return make_answer_without_trailing_emoji(
+                    config,
+                    "minors",
+                    "Обслуживание несовершеннолетних не предусмотрено",
+                    "Услуги для несовершеннолетних не предусмотрены");
         }
 
         if (contains_any(normalized_query,
-                         {
-                                 "какие услуги",
-                                 "какие детские услуги",
-                                 "список услуг",
-                                 "перечень услуг",
-                                 "что доступно",
-                             }) ||
+                         {"какие услуги", "какие детские услуги", "список услуг",
+                          "перечень услуг", "что доступно"}) ||
             (contains_word_prefix(normalized_query, "детск") &&
              contains_word_prefix(normalized_query, "услуг"))) {
             auto names = std::vector<std::string>{};
-
             if (const auto *services = active_services(config); services != nullptr) {
                 for (const auto &candidate : *services) {
-                    if (service_is_available(config, candidate) &&
-                        candidate.minor_access.has_value() && candidate.minor_access->allowed) {
-                        names.push_back(service_list_label(candidate));
+                    if (service_is_available_for_minor(config, candidate)) {
+                        names.push_back(minor_service_list_label(config, candidate));
                     }
                 }
             }
 
             if (!names.empty()) {
-                const auto list = em_dash_list(names);
-                return make_answer(config,
-                                   "minors",
-                                   std::format("Для несовершеннолетних доступны услуги:\n{}",
-                                               list),
-                                   std::format("Для несовершеннолетних доступны следующие услуги:\n{}",
-                                               list));
+                auto customer = std::format(
+                        "Для несовершеннолетних доступны следующие услуги:\n{}",
+                        em_dash_list(names));
+                customer += "\n\n";
+                customer += nearby_slots_offer();
+                return make_answer_without_trailing_emoji(
+                        config,
+                        "minors",
+                        std::format("Для несовершеннолетних доступны услуги:\n{}",
+                                    em_dash_list(names)),
+                        std::move(customer));
             }
         }
 
         if (asks_parent_presence) {
-            const auto text = parent_presence_text(amenities);
-            return make_answer(config, "minors", text, text);
+            return make_answer_without_trailing_emoji(
+                    config,
+                    "minors",
+                    parent_presence_fact_text(amenities),
+                    parent_presence_text(amenities));
         }
 
         auto customer = std::string{
-                "Да, некоторые услуги доступны несовершеннолетним. Возможность записи и минимальный возраст зависят от выбранной услуги"};
-        customer = append_sentence(std::move(customer), parent_presence_text(amenities));
-        customer = append_sentence(std::move(customer),
-                                   "уточните, пожалуйста, какая услуга вас интересует");
-        return make_answer(config,
-                           "minors",
-                           "В организации есть отдельные услуги для несовершеннолетних",
-                           std::move(customer));
+                "Да, некоторые услуги доступны несовершеннолетним. 🧒"};
+        customer += "\n\n";
+        customer +=
+                "Возможность записи и минимальный возраст зависят от желаемой услуги.";
+        customer += "\n\n";
+        customer += std::format(
+                "Уточните, пожалуйста, какая услуга Вас интересует? 😊{}",
+                friendly_flower());
+        return make_answer_without_trailing_emoji(
+                config,
+                "minors",
+                "В организации есть отдельные услуги для несовершеннолетних",
+                std::move(customer));
     }
 
     const auto quoted_name = std::format("«{}»", service->name);
     const auto append_parent_presence = [&](std::string text) {
-        return asks_parent_presence
-                       ? append_sentence(std::move(text),
-                                         parent_presence_text(amenities))
-                       : text;
+        if (!asks_parent_presence) {
+            return text;
+        }
+
+        text = sentence(std::move(text));
+        text += "\n\n";
+        text += parent_presence_text(amenities);
+        return text;
     };
 
     if (requested_age.has_value() && *requested_age >= 18) {
-        return make_answer(config,
-                           "minors",
-                           std::format("Для услуги {} возрастное ограничение для несовершеннолетних не применяется",
-                                       quoted_name),
-                           append_parent_presence(std::format(
-                                   "Да, в {} лет услуга {} доступна",
-                                   *requested_age,
-                                   quoted_name)));
+        auto customer = std::format("Да, в {} лет услуга {} доступна",
+                                    *requested_age,
+                                    quoted_name);
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+        return make_answer_without_trailing_emoji(
+                config,
+                "minors",
+                std::format("Для услуги {} возрастное ограничение для несовершеннолетних "
+                            "не применяется",
+                            quoted_name),
+                append_parent_presence(std::move(customer)));
     }
 
-    if (!amenities.serves_minors || (!service->minor_access.has_value() || !service->minor_access->allowed)) {
-        return make_answer(config,
-                           "minors",
-                           std::format("Услуга {} доступна только совершеннолетним",
-                                       quoted_name),
-                           append_parent_presence(std::format(
-                                   "К сожалению, услуга {} доступна только с 18 лет",
-                                   quoted_name)));
+    const auto minor_access = effective_minor_access(config, *service);
+    if (!amenities.serves_minors || !minor_access.has_value() ||
+        !minor_access->allowed) {
+        auto customer = std::format(
+                "К сожалению, услуга {} доступна только с 18 лет. 😌",
+                quoted_name);
+        return make_answer_without_trailing_emoji(
+                config,
+                "minors",
+                std::format("Услуга {} доступна только совершеннолетним", quoted_name),
+                append_parent_presence(std::move(customer)));
     }
 
-    const auto min_age = service->minor_access->min_age.value_or(18);
+    const auto min_age = minor_access->min_age.value_or(18);
+
+    if (child_manicure_service(*service)) {
+        const auto manicure_policy = manicure_minor_policy_text(amenities);
+
+        if (!requested_age.has_value()) {
+            auto customer = asks_minimum_age
+                                    ? manicure_policy
+                                    : std::string{
+                                              "Да, конечно! Мы с радостью принимаем юных "
+                                              "гостей на безопасный гигиенический маникюр. "
+                                              "🧒💅\n\n"} + manicure_policy;
+            customer += "\n\n";
+            customer += std::format("Подсказать Вам ближайшие свободные окошки? 😊{}",
+                                    friendly_flower());
+            return make_answer_without_trailing_emoji(
+                    config,
+                    "minors",
+                    std::format("Детский гигиенический маникюр доступен с {} лет; "
+                                "стойкое покрытие и наращивание — с {} лет",
+                                min_age,
+                                amenities.minor_nail_coating_min_age),
+                    std::move(customer));
+        }
+
+        if (*requested_age < min_age) {
+            auto customer = std::format(
+                    "Для {} лет детский гигиенический маникюр у нас пока не "
+                    "предусмотрен — мы принимаем юных гостей на эту процедуру с {} "
+                    "лет. 😌",
+                    *requested_age,
+                    min_age);
+            return make_answer_without_trailing_emoji(
+                    config,
+                    "minors",
+                    std::format("Минимальный возраст для услуги {} — {} лет",
+                                quoted_name,
+                                min_age),
+                    std::move(customer));
+        }
+
+        if (*requested_age < amenities.minor_nail_coating_min_age) {
+            auto customer = std::format(
+                    "Ой, для {} лет у нас есть отличная и очень бережная процедура — "
+                    "«детский гигиенический маникюр»! 🧒💅",
+                    *requested_age);
+            customer += "\n\n";
+            customer +=
+                    "Мы аккуратно поухаживаем за пальчиками без использования обрезных "
+                    "инструментов. А вот стойкое покрытие гель-лаком в этом возрасте мы "
+                    "не делаем: ногтевая пластина у деток ещё слишком мягкая, и мы "
+                    "бережём её. 😌✨";
+            customer += "\n\n";
+            customer += minor_parent_presence_paragraph(amenities);
+            customer += "\n\n";
+            customer += std::format(
+                    "Подсказать свободные окошки, чтобы Вам было удобно прийти вдвоём? "
+                    "😊{}",
+                    friendly_flower());
+            return make_answer_without_trailing_emoji(
+                    config,
+                    "minors",
+                    std::format("В {} лет доступен детский гигиенический маникюр без "
+                                "стойкого покрытия и наращивания",
+                                *requested_age),
+                    std::move(customer));
+        }
+
+        auto customer = std::format(
+                "Да, в {} лет можно записаться на детский маникюр. 🧒💅",
+                *requested_age);
+        customer += "\n\n";
+        customer += manicure_policy;
+        customer += "\n\n";
+        customer += nearby_slots_offer();
+        return make_answer_without_trailing_emoji(
+                config,
+                "minors",
+                std::format("Услуга {} доступна в {} лет", quoted_name, *requested_age),
+                std::move(customer));
+    }
+
+    if (auto specialized = specialized_minor_service_answer(config,
+                                                            *service,
+                                                            requested_age,
+                                                            min_age);
+        specialized.has_value()) {
+        return specialized;
+    }
 
     if (requested_age.has_value() && *requested_age < min_age) {
-        return make_answer(config,
-                           "minors",
-                           std::format("Минимальный возраст для услуги {} — {} лет",
-                                       quoted_name,
-                                       min_age),
-                           append_parent_presence(std::format(
-                                   "К сожалению, услуга {} доступна с {} лет",
-                                   quoted_name,
-                                   min_age)));
+        auto customer = std::format(
+                "Для {} лет услуга {} пока не подходит. По правилам безопасности мы "
+                "выполняем её с {} лет. 😌✨",
+                *requested_age,
+                quoted_name,
+                min_age);
+        const auto alternatives = minor_service_labels_for_age(config,
+                                                                *requested_age,
+                                                                service);
+        if (!alternatives.empty()) {
+            customer += "\n\n";
+            customer += "Для этого возраста можем предложить:\n";
+            customer += em_dash_list(alternatives);
+            customer += "\n\n";
+            customer += nearby_slots_offer();
+        }
+
+        return make_answer_without_trailing_emoji(
+                config,
+                "minors",
+                std::format("Минимальный возраст для услуги {} — {} лет",
+                            quoted_name,
+                            min_age),
+                append_parent_presence(std::move(customer)));
     }
 
-    const auto available_text = std::format(
-            "Услуга {} доступна несовершеннолетним с {} лет",
-            quoted_name,
-            min_age);
-    return make_answer(config,
-                       "minors",
-                       available_text,
-                       append_parent_presence(asks_minimum_age
-                                                      ? available_text
-                                                      : std::format(
-                                                                "Да, услуга {} доступна несовершеннолетним с {} лет",
-                                                                quoted_name,
-                                                                min_age)));
+    auto customer = requested_age.has_value()
+                            ? std::format(
+                                      "Да, в {} лет можно записаться на услугу {}. "
+                                      "Мастер обязательно учтёт возраст гостя и подберёт "
+                                      "максимально бережный формат процедуры. 😌✨",
+                                      *requested_age,
+                                      quoted_name)
+                            : std::format(
+                                      "Да, услуга {} доступна несовершеннолетним с {} "
+                                      "лет. Мастер обязательно учтёт возраст гостя и "
+                                      "подберёт максимально бережный формат процедуры. "
+                                      "😌✨",
+                                      quoted_name,
+                                      min_age);
+
+    customer += "\n\n";
+    customer +=
+            "Для несовершеннолетнего гостя администратор заранее подскажет, "
+            "потребуется ли согласие родителя для выбранной процедуры. ☝️";
+    customer += "\n\n";
+    customer += nearby_slots_offer();
+
+    const auto fact = std::format("Услуга {} доступна несовершеннолетним с {} лет",
+                                  quoted_name,
+                                  min_age);
+    return make_answer_without_trailing_emoji(
+            config,
+            "minors",
+            fact,
+            append_parent_presence(std::move(customer)));
 }
 
 [[nodiscard]] const std::string *find_matching_product(
@@ -5511,16 +6267,16 @@ void append_unique_answer(std::vector<organization_config_answer_s> &answers,
 
 [[nodiscard]] std::string compact_booking_method_action_label(
         const organization_booking_method_s &method) {
-    if (method.id == "phone") {
-        return "созвониться по телефону";
-    }
+    if (method.id == "phone") return "созвониться по телефону ☎️";
     if (method.id == "yandex_maps") {
-        return "через Яндекс.Карты (самостоятельная запись)";
+        return "через Яндекс.Карты 🗺️ (самостоятельная запись)";
     }
-    if (method.id == "website") {
-        return "на сайте";
-    }
-
+    if (method.id == "telegram") return "через Telegram 💬";
+    if (method.id == "whatsapp") return "через WhatsApp 💬";
+    if (method.id == "max") return "через MAX 💬";
+    if (method.id == "website") return "на сайте 🌐";
+    if (method.id == "2gis") return "через 2ГИС 🗺️";
+    if (method.id == "google_maps") return "через Google Maps 🗺️";
     return booking_method_label(method);
 }
 
@@ -5538,14 +6294,14 @@ void append_unique_answer(std::vector<organization_config_answer_s> &answers,
 
     auto result = std::string{"Мы предлагаем следующие способы записи:\n"};
     result += em_dash_list(labels);
-    result += "\n\n";
-    result += "Уточните, пожалуйста, какой способ записи на услугу для Вас наиболее удобный? 😊";
 
     if (labels.size() >= 2) {
         result += "\n\n";
         result += "Примечание: наши клиенты чаще всего выбирают первые два способа 😎";
     }
 
+    result += "\n\n";
+    result += direct_chat_booking_offer();
     return result;
 }
 
@@ -6110,6 +6866,10 @@ booking_answer_with_service_context(
                                                                             "сертификат",
                                                                             "абонемент",
                                                                         });
+    const auto mentions_certificate_payment =
+            mentions_gift_certificate &&
+            (asks_payment ||
+             contains_any_word_prefix(query, {"принима", "рассчит", "платеж"}));
     const auto asks_certificate_validity =
             mentions_gift_certificate &&
             contains_any_word_prefix(query,
@@ -6145,7 +6905,7 @@ booking_answer_with_service_context(
                                                                     })));
     const auto has_unambiguous_method = mentions_cash || card_is_unambiguous ||
                                         mentions_credit_card || mentions_qr || mentions_sbp ||
-                                        mentions_gift_certificate;
+                                        mentions_certificate_payment;
 
     if (asks_payment || (asks_availability && has_unambiguous_method) ||
         asks_certificate_validity || mentions_on_site ||
@@ -6718,6 +7478,7 @@ booking_answer_with_service_context(
                                 "есть у вас",
                                 "есть в салоне",
                                 "можно к вам",
+                                "прийти на",
                             }) ||
            contains_any_word_prefix(query,
                                     {
@@ -7038,6 +7799,7 @@ organization_config_s load_organization_config(const std::filesystem::path &file
     config.general_amenities = organization_general_amenities_s{
             .has_wifi = bool_value(amenities, "has_wifi"),
             .has_free_coffee = bool_value(amenities, "has_free_coffee"),
+            .has_tv = bool_value(amenities, "has_tv"),
             .has_child_zone = bool_value(amenities, "has_child_zone"),
             .serves_minors = bool_value(amenities, "serves_minors"),
             .minor_parent_presence_required = bool_value(
@@ -7075,7 +7837,24 @@ organization_config_s load_organization_config(const std::filesystem::path &file
             },
             .wifi_note = string_value(amenities, "wifi_note"),
             .coffee_note = string_value(amenities, "coffee_note"),
+            .tv_note = string_value(amenities, "tv_note"),
             .child_zone_note = string_value(amenities, "child_zone_note"),
+            .minor_nail_coating_min_age = size_value(
+                    amenities,
+                    "minor_nail_coating_min_age",
+                    14),
+            .minor_parental_consent_from_age = size_value(
+                    amenities,
+                    "minor_parental_consent_from_age",
+                    15),
+            .minor_parental_consent_until_age = size_value(
+                    amenities,
+                    "minor_parental_consent_until_age",
+                    17),
+            .minor_child_visit_with_parent_until_age = size_value(
+                    amenities,
+                    "minor_child_visit_with_parent_until_age",
+                    10),
             .minors_note = string_value(amenities, "minors_note"),
             .gift_certificates_note = string_value(amenities, "gift_certificates_note"),
             .staff_call_button_note = string_value(amenities, "staff_call_button_note"),
@@ -7226,8 +8005,6 @@ std::optional<organization_config_answer_s> answer_from_organization_config(
         append_unique_answer(answers, topics, website_answer(config));
     }
 
-    const auto &amenities = config.general_amenities;
-
     if (parking_intent(query)) {
         append_unique_answer(answers,
                              topics,
@@ -7235,18 +8012,7 @@ std::optional<organization_config_answer_s> answer_from_organization_config(
     }
 
     if (wifi_intent(query)) {
-        append_unique_answer(answers,
-                             topics,
-                             boolean_feature_answer(
-                                     config,
-                                     "wifi",
-                                     amenities.has_wifi,
-                                     "Wi-Fi",
-                                     "Да, у нас есть Wi-Fi",
-                                     "Wi-Fi для гостей не предусмотрен",
-                                     amenities.has_wifi
-                                             ? std::string_view{amenities.wifi_note}
-                                             : std::string_view{}));
+        append_unique_answer(answers, topics, wifi_answer(config));
     }
 
     if (coffee_for_guests_intent(query)) {
@@ -7257,7 +8023,7 @@ std::optional<organization_config_answer_s> answer_from_organization_config(
         append_unique_answer(answers, topics, child_zone_answer(config));
     }
 
-    if (gift_certificate_intent(query)) {
+    if (gift_certificate_intent(query) && !payment_request.gift_certificate) {
         append_unique_answer(answers, topics, gift_certificate_answer(config));
     }
 
